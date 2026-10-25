@@ -2,7 +2,7 @@
 import os
 
 from .astutil import unparen, walk, lkey
-from .loader import Loader, LayoutError, loc_of
+from .loader import Loader, LayoutError, loc_of, const_num
 
 ROLE_ALIASES = ['MK', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'P1', 'P2', 'XORKEY', 'SIMPLESET', 'MIX']
 
@@ -14,11 +14,14 @@ def _tpl():
 
 def tail_replacement(L):
     """The loader's last statement and the text that replaces it: a call of the dumper, after evaluating whatever builds
-    the program.  Three shapes are known:
+    the program.  Four shapes are known:
       return RUN(...)  with  local function RUN(...) return MODULE(host, env)(...) end   (the call moves into the dumper)
       return RUN(...)  with  local RUN = <anything else>                                  (the dumper is called as is)
       return MODULE(host, env)(...)                                                       (newer builds: the program is
-                                                                                           stored in compressed pages)"""
+                                                                                           stored in compressed pages)
+      return R[1](...) with  local R = {MODULE(host, env)}                                (the same, with the results of
+                                                                                           the module call in a table;
+                                                                                           it has run before the tail)"""
     src = L.src
     last = L.root['body'][-1]
     if last['type'] != 'AstStatReturn' or len(last['list']) != 1:
@@ -29,6 +32,11 @@ def tail_replacement(L):
     outer = unparen(call['func'])
     if outer['type'] == 'AstExprCall' and loc_of(outer['func']) is not None:
         return last, '__DUMPER(' + src.slice(outer) + ')'
+    if outer['type'] == 'AstExprIndexExpr' and loc_of(outer['expr']) is not None and const_num(outer['index']) is not None:
+        decl = L.local_decl.get(lkey(loc_of(outer['expr'])))
+        if decl is not None and decl[0]['type'] == 'AstStatLocal':
+            return last, '__DUMPER()'
+        raise LayoutError('loader runner not recognised')
     if loc_of(call['func']) is None:
         raise LayoutError('loader tail not recognised')
     key = lkey(loc_of(call['func']))
