@@ -237,12 +237,20 @@ class Gen:
             p.expr = w.var
             p.leaves = []
 
-        def settle(ops, is_stmt):
+        def settle(ops, is_stmt, ctor=False):
             flush = {}
             if is_stmt:
                 O = [p for p in regs.values() if p.leaves]
                 if st['multi'] is not None and st['multi'] not in ops:
                     raise Exception('pending multi value interrupted by statement in proto %d' % fn.pid)
+                if ctor:
+                    # This statement builds a constructor that is folded back into one expression later, so an empty table
+                    # created before it can stay pending: it will still be created before the constructor.  It has to be
+                    # flushed when something that was evaluated after it is flushed, or the order would change.
+                    fresh = [p for p in O if isinstance(p.expr, Tbl) and not p.expr.items]
+                    rest = [p for p in O if not (isinstance(p.expr, Tbl) and not p.expr.items)]
+                    lim = max([max(p.leaves) for p in rest] + [0])
+                    O = rest + [p for p in fresh if min(p.leaves) < lim]
                 if O:
                     mx = max(max(p.leaves) for p in O)
                     for p in O:
@@ -287,7 +295,7 @@ class Gen:
                 w.declared = True
                 stmts.append(('local', w, e))
 
-        def set_def(n, r, expr, leaves, kind='val', link=None, method=None):
+        def set_def(n, r, expr, leaves, kind='val', link=None, method=None, ctor=False):
             w = fn.def_web[(n.id, r)]
             if inline_ok(w):
                 regs[r] = Pend(expr, w, leaves, kind, link, method)
@@ -310,8 +318,13 @@ class Gen:
                 else:
                     gen.log.append('dropped dead value in proto %d rec %s (%s)' % (fn.pid, n.rid, n.kind))
                 return
-            settle([p], True)
+            settle([p], True, ctor)
             declare_assign(w, p.expr)
+
+        def fills_in(u_):
+            # a store of a field into the table that is held in the register it reads as its object
+            nu = nodes[u_[0]]
+            return nu.kind == 'SETTABLEKS' and u_[1] == nu.a['B'] and nu.a['A'] != nu.a['B']
 
         P = fn.P
         pending_term = None
@@ -391,7 +404,11 @@ class Gen:
                     else:
                         pending.append(key)
                         fields.append((key, None))
-                set_def(n, a['A'], Tbl([], fields, pending), [])
+                w = fn.def_web[(n.id, a['A'])]
+                # fields that are not constants are stored after the table exists; when the table is then used once, the
+                # stores and the table form one constructor expression (post.fold_tables) and are not statements of their own
+                w.ctor = bool(pending) and sum(1 for u_ in w.uses if not fills_in(u_)) == 1
+                set_def(n, a['A'], Tbl([], fields, pending), [self.nseq()], ctor=w.ctor)
             elif k == 'LENGTH':
                 x = rd(n, a['B'])
                 settle([x], False)
@@ -413,7 +430,12 @@ class Gen:
                 settle([o, key, v], True)
                 stmts.append(('assign', Idx(o.expr, key.expr), v.expr))
             elif k == 'NEWTABLE':
-                set_def(n, a['A'], Tbl([], fromnew=True), [])
+                w = fn.def_web[(n.id, a['A'])]
+                # A table that a SETLIST fills is a constructor in progress: whatever statements show up before the SETLIST
+                # are fix-ups of the items inside it, so it has to stay pending.  Any other pending table is created where
+                # it was created, so a statement that comes before its use flushes it (it was a local declared earlier).
+                ctor = any(nodes[u_[0]].kind == 'SETLIST' and u_[1] == nodes[u_[0]].a['A'] for u_ in w.uses)
+                set_def(n, a['A'], Tbl([], fromnew=True), [] if ctor else [self.nseq()])
             elif k == 'GETUPVAL':
                 set_def(n, a['A'], fn.upvals[a['B']].var, [self.nseq()])
             elif k == 'SETUPVAL':
@@ -423,7 +445,7 @@ class Gen:
             elif k == 'SETTABLEKS':
                 o = rd(n, a['B'])
                 v = rd(n, a['A'])
-                settle([o, v], True)
+                settle([o, v], True, isinstance(o.expr, Var) and getattr(o.expr.web, 'ctor', False))
                 stmts.append(('assign', Idx(o.expr, self.kbytes(fn, a['aux'])), v.expr))
             elif k == 'SELF':
                 o = rd(n, a['B'])

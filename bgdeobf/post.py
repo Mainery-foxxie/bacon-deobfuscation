@@ -391,16 +391,27 @@ def rebuild_head(s, heads):
     return s
 
 
-def inline_use(heads, web, repl, multi_last=False):
+COMPARE_OPS = ('==', '~=', '<', '<=', '>', '>=')
+
+
+def condlike(e):
+    """an expression the compiler jumps on directly when it is a condition, but computes into a register when it is a value"""
+    return isinstance(e, Not) or (isinstance(e, Bin) and (e.op in ('and', 'or') or e.op in COMPARE_OPS))
+
+
+def inline_use(heads, web, repl, multi_last=False, test=False):
     """substitute Var(web) by repl inside the head expression list; None when the substitution would reorder
-    side effects.  Evaluation order: left to right, operands before the operation."""
+    side effects.  Evaluation order: left to right, operands before the operation.  With `test` the head is a condition:
+    a variable that is tested there cannot be replaced by an and/or/not/comparison (the bytecode of `if a and b` has no
+    register for the value, so the original, which had one, had a local variable)."""
     st = {'eff': False, 'reads': False, 'done': False, 'bad': False}
     rc = has_call(repl)
     rsimple = isinstance(repl, (Const, Imp, Var))
+    rcond = condlike(repl)
 
-    def visit(e, multi=False, cond=False):
+    def visit(e, multi=False, cond=False, tested=False):
         if isinstance(e, Var) and e.web is web:
-            if (st['eff'] and not rsimple) or (rc and st['reads']) or (cond and not rsimple):
+            if (st['eff'] and not rsimple) or (rc and st['reads']) or (cond and not rsimple) or (tested and rcond):
                 st['bad'] = True
             st['done'] = True
             if multi and isinstance(repl, (Call, Multi)):
@@ -421,8 +432,11 @@ def inline_use(heads, web, repl, multi_last=False):
             st['reads'] = True
             return n
         if isinstance(e, Bin) and e.op in ('and', 'or'):
-            n.l = visit(e.l, False, cond)
-            n.r = visit(e.r, False, True)
+            n.l = visit(e.l, False, cond, tested)
+            n.r = visit(e.r, False, True, tested)
+            return n
+        if isinstance(e, Not):
+            n.e = visit(e.e, False, cond, tested)
             return n
         if isinstance(e, Tbl):
             n.fields = [(k, visit(v, False, cond) if v is not None else None) for k, v in e.fields]
@@ -437,7 +451,7 @@ def inline_use(heads, web, repl, multi_last=False):
 
     out = []
     for i, h in enumerate(heads):
-        out.append(visit(h, multi_last and i == len(heads) - 1))
+        out.append(visit(h, multi_last and i == len(heads) - 1, False, test))
     if st['bad'] or not st['done']:
         return None
     return out
@@ -468,7 +482,7 @@ def inline_single_use(stmts, cnt):
             if heads is not None and any(refs(h, w) for h in heads):
                 e = s[2]
                 # a table constructor must stay a statement when it is built field by field later
-                new_heads = inline_use(heads, w, e, nxt[0] in ('return', 'forin'))
+                new_heads = inline_use(heads, w, e, nxt[0] in ('return', 'forin'), nxt[0] == 'if')
                 if new_heads is not None:
                     stmts[i + 1] = rebuild_head(nxt, new_heads)
                     del stmts[i]

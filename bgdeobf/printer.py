@@ -197,6 +197,12 @@ class Printer:
             return '(' + s + ')'
         return s
 
+    @staticmethod
+    def cut(e):
+        """a call as the last value of a list of fixed length is cut down to one value, which is how the original
+        compiled `return (f())`, `g(a, (f()))` or `{(f())}`; written without the parentheses it would hand on every result"""
+        return Paren(e) if type(e) is Call else e
+
     def rhs(self, e, scope, ind):
         """the right-hand side of a one-target assignment: `...` there is already cut down to one value"""
         if isinstance(e, Vararg):
@@ -235,6 +241,8 @@ class Printer:
         if isinstance(e, Call):
             args = []
             for i, a in enumerate(e.args):
+                if i == len(e.args) - 1:
+                    a = self.cut(a)
                 if isinstance(a, Func) and e.method in ('Connect', 'Once', 'connect') and i == len(e.args) - 1:
                     key = None
                     if isinstance(e.fn, Idx) and isinstance(e.fn.key, str):
@@ -283,7 +291,7 @@ class Printer:
                     parts.append(k + ' = ' + self.ex(v, scope, ind2))
                 else:
                     parts.append('[' + lua_str(k.encode('latin1')) + '] = ' + self.ex(v, scope, ind2))
-            parts += [self.ex(x, scope, ind2) for x in e.items]
+            parts += [self.ex(self.cut(x) if i == len(e.items) - 1 else x, scope, ind2) for i, x in enumerate(e.items)]
             if not parts:
                 return '{}'
             one = '{' + ', '.join(parts) + '}'
@@ -477,7 +485,7 @@ class Printer:
         if k == 'return':
             if not s[1]:
                 return [ind + 'return']
-            return [ind + 'return ' + ', '.join(self.ex(x, scope, ind) for x in s[1])]
+            return [ind + 'return ' + ', '.join(self.ex(self.cut(x) if i == len(s[1]) - 1 else x, scope, ind) for i, x in enumerate(s[1]))]
         if k == 'if':
             out = []
             c, th, el = s[1], s[2], s[3]
@@ -525,7 +533,7 @@ class Printer:
                         w.hint = self.forin_hint(exprs, i)
                     names.append(self.dn(w, sc))
             sc.counter['loop_active'] = 1
-            ex = [self.ex(x, scope, ind) for x in exprs]
+            ex = [self.ex(self.cut(x) if i == len(exprs) - 1 else x, scope, ind) for i, x in enumerate(exprs)]
             if len(exprs) == 3 and isinstance(exprs[2], Const) and exprs[2].kind == 'z':
                 ex = ex[:2]
             out = [ind + 'for ' + ', '.join(names) + ' in ' + ', '.join(ex) + ' do']
