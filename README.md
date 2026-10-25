@@ -94,18 +94,26 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
 `python -m bgdeobf --check` shows whether the tools can run.
 
 ## What has and hasn't been tested
-- Tested on 5 real builds (Bacon Guard v0.42.0 "The Morgue Shift", ClarksCicaverse, TommyPlay, FORGE Protection build
-  03d3bec6a6b0, and a newer build with no banner that keeps the program in compressed pages). Bytecode check: 168/168,
-  23/24, 172/172, 93/93 and 172/172 functions identical (one Cic function differs by an extra `return` after `error()`,
-  same behavior). Other builds may use patterns that are not covered yet; read the error message.
+- Tested on 6 real builds (Bacon Guard v0.42.0 "The Morgue Shift", ClarksCicaverse, TommyPlay, FORGE Protection build
+  03d3bec6a6b0, a build with no banner that keeps the program in compressed pages, and Bacon Guard v0.43.0 | FORGE
+  Protection build baf6ea30ebd0). Bytecode check: 168/168, 23/24, 172/172, 93/93, 172/172 and 69/70 functions identical.
+  The 24th Cic function differs by an extra `return` after `error()` (same behavior); one function of the v0.43.0 script has
+  the same instructions with some value loads in a different place (no call, write or jump moved). Other builds may use
+  patterns that are not covered yet; read the error message.
+- v0.43.0 changed how the VM stores a program: every function's registers are shifted by a per-function number, a loop
+  can be one record that holds the whole loop, and a closure record carries its own capture list. All three are handled.
+  Not handled: a closure whose captures are separate records in that newer layout (the sample has none), and `...`
+  assigned into variables that were declared earlier (raises an error instead of guessing).
 - Variable names are only guesses; the result is checked for shape, not for names.
-- About 185 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
+- About 210 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
   `tests/samples/` is empty): sandbox limits, damaged/truncated files, hard timeout, queue, the URL downloader (local
-  server + fake resolver), the decompiler on small hand-assembled programs (these need no protected script), and the
-  whole bot flow (slash, menu, `!uwu`) using the **real discord.py library with a fake Discord network**. A live connection to Discord could **not** be tested where this was built (no token). To check on
+  server + fake resolver), the decompiler and the decoder on small hand-assembled programs (these need no protected
+  script), and the whole bot flow (slash, menu, `!uwu`) using the **real discord.py library with a fake Discord network**.
+  A live connection to Discord could **not** be tested where this was built (no token). To check on
   your machine: set `GUILD_ID`, start the bot, send one file with `/deobf` and one with `!uwu`. Downloading from the real
   internet (e.g. raw.githubusercontent.com) could not be tried there either; the TLS path uses aiohttp's defaults.
-- Windows: a real run with Windows Luau binaries worked. macOS is untested.
+- Windows: a real run with Windows Luau binaries worked on an earlier version of this tool (this version was not run
+  there). macOS is untested.
 - Tests that need a protected script are skipped when `tests/samples/` is empty (the scripts are not included in the
   zip). Put a protected script there to run them.
 

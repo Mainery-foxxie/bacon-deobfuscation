@@ -7,7 +7,7 @@ import time
 
 from .astutil import walk, lkey, unparen
 from .loader import LayoutError, loc_of, is_in
-from .luavm import (Interp, Func, HostFunc, LuaTable, LuaError, StepLimit, Unsupported, _Return, _Env, LOG)
+from .luavm import (Interp, Func, HostFunc, LuaTable, LuaError, StepLimit, Unsupported, _Return, _Env, LOG, num)
 from .refspec import State, SPECS
 
 TRIALS = 24
@@ -123,7 +123,7 @@ class Classifier(object):
             'FUSED': HostFunc(st.fused, 'fused'), 'UP': st.UP, 'ENV': self.env_table,
             'OP': f['op'], 'EF': f['ef'], 'A': f['A'], 'B': f['B'], 'C': f['C'], 'RF': f['RF'], 'HF': f['HF'],
             'AUX': f['AUX'], 'NXT': st.nxt, 'ALT': st.alt, 'TOP': st.top, 'REC': st.rec, 'CLR': st.clr,
-            'PROF': st.prof, 'VARARGS': LuaTable(), 'NVAR': 0, 'PC': 1,
+            'PROF': st.prof, 'VARARGS': st.varargs, 'NVAR': st.nvar, 'PC': 1,
         }
         cells = {}
         for k in self.nil_locs:
@@ -135,15 +135,28 @@ class Classifier(object):
         for key, role in L.roles.items():
             if role == 'MKFN':
                 cells[key] = [HostFunc(_noop, 'mkfn')]
-        wt = LuaTable()
-        for op, expr in L.wtab_items:
-            fn = self._func_node(expr)
-            if fn is not None:
-                wt.set(op, Func(fn, self.interp, cells))
-        wl = self.loc.get('WTAB')
-        if wl is not None:
-            cells[wl] = [wt]
+        for local, items in L.simple_table_items:
+            tab = LuaTable()
+            for key, expr in items:
+                v = self._table_value(expr, cells)
+                if v is not None:
+                    tab.set(key, v)
+            cells[local['location']] = [tab]
         return cells
+
+    def _table_value(self, expr, cells):
+        expr = unparen(expr)
+        t = expr['type']
+        if t == 'AstExprConstantNumber':
+            return num(expr['value'])
+        if t == 'AstExprConstantBool':
+            return bool(expr['value'])
+        if t == 'AstExprConstantString':
+            return expr['value']
+        fn = self._func_node(expr)
+        if fn is not None:
+            return Func(fn, self.interp, cells)
+        return None
 
     def _func_node(self, expr):
         expr = unparen(expr)
@@ -157,7 +170,7 @@ class Classifier(object):
         f = st.f
         m = {'REC': st.rec, 'REGS': st.R, 'KGET': HostFunc(st.kget, 'kget'), 'IMP': HostFunc(st.imp, 'imp'),
              'FUSED': HostFunc(st.fused, 'fused'), 'ENV': self.env_table, 'UP': st.UP, 'TOP': st.top, 'NXT': st.nxt,
-             'ALT': st.alt, 'CLR': st.clr, 'VARARGS': LuaTable(), 'NVAR': 0, 'PROF': st.prof,
+             'ALT': st.alt, 'CLR': st.clr, 'VARARGS': st.varargs, 'NVAR': st.nvar, 'PROF': st.prof,
              'OP': op if op is not None else f['op'], 'EF': f['ef'], 'A': f['A'], 'B': f['B'], 'C': f['C'],
              'RF': f['RF'], 'HF': f['HF'], 'AUX': f['AUX']}
         return [m.get(r) for r in roles]
@@ -240,6 +253,178 @@ class Classifier(object):
                 elif ti in (2, 3):
                     st.top = ret[0]
         return run
+
+    def run_group(self, ti, fn, stmts, mode):
+        """statements of a fused-loop handler run once.  mode: 'plain' (a data operation); 'jump' (the operation ends by
+        entering the loop, i.e. it behaves like a jump); 'loop' (the loop control: leaving the loop is a `return`, falling
+        through goes round again, i.e. it behaves like a conditional jump back)"""
+        roles = self.L.call_roles['D%d' % (5 if ti == 6 else ti)]
+        params = fn['args']
+
+        def run(st):
+            cells = self.seed(st)
+            local = dict(cells)
+            args = self.args_for(roles, st)
+            for i, p in enumerate(params):
+                local[p['location']] = [args[i] if i < len(args) else None]
+            env = _Env(local, [])
+            exited = False
+            try:
+                for s in stmts:
+                    self.interp.exec_stat(s, env)
+            except _Return:
+                exited = True
+            for r_, attr in (('TOP', 'top'), ('NXT', 'nxt')):
+                if r_ in roles:
+                    setattr(st, attr, local[params[roles.index(r_)]['location']][0])
+            if mode == 'jump' or (mode == 'loop' and not exited):
+                st.nxt = st.alt
+        return run
+
+    # ------------------------------------------------------------------ fused loops
+    def classify_loop_ded(self, ti, key, fn):
+        """A handler that runs a whole loop inside one record: the record parts are read first, then
+        `while true do <micro-operations, one of them the loop control> end`.  The result is
+        {'loop': {'pre': [...], 'head': [...], 'body': [...], 'tail': [...]}} with micro-operations as in other handlers;
+        the loop control is a FORGLOOP at the head (the iterator is called before each pass of the body) or a FORNLOOP
+        at the tail."""
+        where = 'ded%d' % ti
+        body = fn['body']['body']
+        w = body[-1] if body else None
+        if w is None or w['type'] != 'AstStatWhile' or sum(1 for s_ in body if s_['type'] == 'AstStatWhile') != 1:
+            self.mapping.unknown.append((where, key, 'loop handler shape not recognised'))
+            return
+        cond = unparen(w['condition'])
+        if cond['type'] != 'AstExprConstantBool' or not cond['value']:
+            self.mapping.unknown.append((where, key, 'loop handler shape not recognised'))
+            return
+        rec_loc = fn['args'][0]['location']
+        var_part, part_of, reads, others = {}, {}, {}, []
+        for s_ in body[:-1]:
+            part = self._part_read(s_, rec_loc)
+            if part is not None:
+                var_part[lkey(s_['vars'][0])] = part
+                reads.setdefault(part, []).append(s_)
+                continue
+            fp = self._fused_read(s_, var_part)
+            if fp is not None:
+                for v in s_['vars']:
+                    part_of[lkey(v)] = fp
+                reads[fp].append(s_)
+                continue
+            others.append(s_)
+
+        def parts_in(s_):
+            ps = set()
+            for n, p in walk(s_):
+                if n['type'] == 'AstExprLocal' and lkey(n['local']) in part_of:
+                    ps.add(part_of[lkey(n['local'])])
+            return ps
+
+        def groups_of(stmts):
+            gs = []
+            for s_ in stmts:
+                ps = parts_in(s_)
+                if len(ps) > 1:
+                    return None
+                if not ps:
+                    if not gs:
+                        return None
+                    gs[-1][1].append(s_)
+                    continue
+                part = next(iter(ps))
+                if gs and gs[-1][0] == part:
+                    gs[-1][1].append(s_)
+                else:
+                    gs.append([part, [s_]])
+            return gs
+
+        pre_groups = groups_of(others)
+        loop_groups = groups_of(w['body']['body'])
+        if pre_groups is None or loop_groups is None or not loop_groups:
+            self.mapping.unknown.append((where, key, 'loop handler: micro-operations not separable'))
+            return
+        used = [g[0] for g in pre_groups + loop_groups]
+        if len(set(used)) != len(used) or any(pt not in reads for pt in used):
+            self.mapping.unknown.append((where, key, 'loop handler: a record part is used twice'))
+            return
+        ctl = [i for i, g in enumerate(loop_groups)
+               if any(n['type'] == 'AstStatReturn' for s_ in g[1] for n, p in walk(s_))]
+        if len(ctl) != 1:
+            self.mapping.unknown.append((where, key, 'loop handler: loop control not found'))
+            return
+        ci = ctl[0]
+        if ci == 0 and len(loop_groups) > 1:
+            shape = 'head'
+        elif ci == len(loop_groups) - 1:
+            shape = 'tail'
+        else:
+            self.mapping.unknown.append((where, key, 'loop handler: loop control in the middle of the body'))
+            return
+        res = {'pre': [], 'head': [], 'body': [], 'tail': []}
+
+        def one(group, mode, section, label):
+            part, stmts = group
+            # the iterator check in front of a loop only looks like a no-op until a non-function is tried, so a group that
+            # behaves like a jump is tried first
+            modes = [mode] if mode != 'pre' else ['jump', 'plain']
+            for md in modes:
+                runner = self.run_group(ti, fn, reads[part] + stmts, md)
+                names = self.find(runner, domain_key=('ded', ti, key, part), skip=self.SKIP)
+                if names:
+                    break
+            nm = self.pick(names, '%s/%d.%s' % (where, key, label), key)
+            if nm is None:
+                return False
+            ir, fixed = _strip_fixed(nm)
+            res[section].append((ir, part, fixed, SPECS[nm].kind == 'ctrl'))
+            return True
+
+        for gi, g in enumerate(pre_groups):
+            if not one(g, 'pre', 'pre', 'pre%d' % gi):
+                return
+        for gi, g in enumerate(loop_groups):
+            if gi == ci:
+                if not one(g, 'loop', shape, 'loop'):
+                    return
+            elif not one(g, 'plain', 'body', 'body%d' % gi):
+                return
+        ctrl_name = res[shape][0][0]
+        if ctrl_name != ('FORGLOOP' if shape == 'head' else 'FORNLOOP'):
+            self.mapping.unknown.append((where, key, 'loop handler: unexpected loop control %s' % ctrl_name))
+            return
+        # a preparation that ends in a jump (the iterator check) is only possible in front of a head-controlled loop
+        for m in res['pre'][:-1] + (res['pre'] if shape == 'tail' else []):
+            if m[3]:
+                self.mapping.unknown.append((where, key, 'loop handler: unexpected jump before the loop'))
+                return
+        self.mapping.ded[(ti, key)] = {'loop': res}
+
+    @staticmethod
+    def _part_read(s_, rec_loc):
+        """`local V = REC[11 + k]` -> k"""
+        if s_['type'] != 'AstStatLocal' or len(s_['vars']) != 1 or len(s_['values']) != 1:
+            return None
+        v = unparen(s_['values'][0])
+        if v['type'] != 'AstExprIndexExpr':
+            return None
+        o, i = loc_of(v['expr']), unparen(v['index'])
+        if o is None or o['location'] != rec_loc or i['type'] != 'AstExprConstantNumber' or i['value'] < 11:
+            return None
+        return int(i['value']) - 11
+
+    @staticmethod
+    def _fused_read(s_, var_part):
+        """`local a, b, ... = FUSED(V)` with V a part read -> the part"""
+        if s_['type'] != 'AstStatLocal' or len(s_['values']) != 1:
+            return None
+        v = unparen(s_['values'][0])
+        if v['type'] != 'AstExprCall' or len(v['args']) != 1:
+            return None
+        a = loc_of(v['args'][0])
+        if a is None:
+            return None
+        return var_part.get(lkey(a))
 
     # ------------------------------------------------------------------ matching
     def match(self, runner, spec, domain=None, variant=None, strict=False):
@@ -407,6 +592,9 @@ class Classifier(object):
             nm = self.pick(names, 'ded%d' % ti, key)
             if nm is not None:
                 self.mapping.ded[(ti, key)] = [(nm, 0, {}, False)]
+            return
+        if any(s['type'] == 'AstStatWhile' for s in body):
+            self.classify_loop_ded(ti, key, fn)
             return
         blocks = [s for s in body if s['type'] == 'AstStatBlock']
         tail = [s for s in body if s['type'] != 'AstStatBlock']

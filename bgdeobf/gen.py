@@ -16,6 +16,17 @@ ROBLOX_GLOBALS = {'game', 'workspace', 'script', 'math', 'string', 'table', 'Ins
                   'firetouchinterest', 'getconnections', 'setclipboard', 'queue_on_teleport'}
 
 
+# services a script usually fetches through its own small wrapper (`local function getService(name) ... end`)
+SERVICE_NAMES = {'Players', 'ReplicatedStorage', 'ReplicatedFirst', 'Workspace', 'RunService', 'VirtualUser',
+                 'VirtualInputManager', 'TweenService', 'UserInputService', 'CollectionService', 'BadgeService', 'CoreGui',
+                 'HttpService', 'Lighting', 'StarterGui', 'StarterPack', 'StarterPlayer', 'TeleportService',
+                 'MarketplaceService', 'SoundService', 'ContextActionService', 'GuiService', 'Debris', 'ServerStorage',
+                 'ServerScriptService', 'TextService', 'TextChatService', 'PathfindingService', 'ProximityPromptService',
+                 'Stats', 'GroupService', 'LocalizationService', 'MarketplaceService', 'PhysicsService', 'NetworkClient',
+                 'ScriptContext', 'SocialService', 'UserService', 'VoiceChatService', 'AssetService', 'ContentProvider',
+                 'InsertService', 'KeyframeSequenceProvider', 'LogService', 'MaterialService', 'Teams', 'TestService'}
+
+
 class Pend:
     __slots__ = ('expr', 'web', 'leaves', 'kind', 'link', 'method')
 
@@ -89,6 +100,9 @@ def suggest(e):
                 if e.method == 'Connect':
                     return 'connection'
                 return camel(e.method)
+            if len(e.args) == 1 and isinstance(e.args[0], Const) and e.args[0].kind == 's' \
+                    and e.args[0].v.decode('latin1') in SERVICE_NAMES and not isinstance(e.fn, Imp):
+                return e.args[0].v.decode('latin1')
             if isinstance(e.fn, Imp):
                 p = e.fn.path
                 if p == ('Instance', 'new') and e.args and isinstance(e.args[0], Const) and e.args[0].kind == 's':
@@ -163,6 +177,11 @@ class Gen:
                 u = nodes[w.uses[0][0]]
                 if u.kind in ('SETTABLEKS', 'SETTABLE') and w.uses[0][1] == u.a['A'] and u.a['A'] < u.a['B']:
                     # the stored value sits below the table register: it is a local declared earlier, not a temporary
+                    w.keep = True
+                    return False
+                if u.kind == 'SELF' and w.uses[0][1] == u.a['B'] and u.a['B'] != u.a['A']:
+                    # a method call on an expression computes the object into the call's own register; one that is read
+                    # from somewhere else is a local variable
                     w.keep = True
                     return False
             return ok
@@ -275,16 +294,17 @@ class Gen:
                 return
             p = Pend(expr, None, leaves)
             if not w.uses:
-                # dead value: constants, plain copies and closures vanish; anything that does work stays (a call, an
-                # index read that can raise or run a metamethod, arithmetic, an upvalue read), because the original
+                # dead value: constants and plain copies vanish; anything that does work stays (a call, an index read
+                # that can raise or run a metamethod, arithmetic, an upvalue read, a function), because the original
                 # compiled it and removing it would change which upvalues a closure captures first
                 if isinstance(expr, Call):
                     settle([p], True)
                     stmts.append(('call', expr))
-                elif isinstance(expr, Tbl):
+                elif isinstance(expr, (Tbl, Func)):
+                    # a table is built field by field later; a function nobody calls is still part of the program
                     settle([p], True)
                     declare_assign(w, p.expr)
-                elif not isinstance(expr, (Const, Var, Func)):
+                elif not isinstance(expr, (Const, Var)):
                     settle([p], True)
                     stmts.append(('call_cond', p.expr))
                 else:
@@ -320,21 +340,21 @@ class Gen:
             elif k == 'GETTABLEKS':
                 o = rd(n, a['B'])
                 set_def(n, a['A'], Idx(o.expr, self.kbytes(fn, a['aux'])), o.leaves + [self.nseq()])
-            elif k in ('ADD', 'SUB', 'MUL'):
+            elif k in ARITH_RR:
                 x = rd(n, a['B'])
                 y = rd(n, a['C'])
                 settle([x, y], False)
-                set_def(n, a['A'], Bin({'ADD': '+', 'SUB': '-', 'MUL': '*'}[k], x.expr, y.expr), x.leaves + y.leaves + [self.nseq()])
-            elif k == 'OR':
+                set_def(n, a['A'], Bin(ARITH_RR[k], x.expr, y.expr), x.leaves + y.leaves + [self.nseq()])
+            elif k in ('OR', 'AND'):
                 x = rd(n, a['B'])
                 y = rd(n, a['C'])
                 settle([x, y], False)
-                set_def(n, a['A'], Bin('or', x.expr, y.expr), x.leaves + y.leaves + [self.nseq()])
-            elif k == 'ORK':
+                set_def(n, a['A'], Bin(k.lower(), x.expr, y.expr), x.leaves + y.leaves + [self.nseq()])
+            elif k in ('ORK', 'ANDK'):
                 x = rd(n, a['B'])
                 kc = kconst(P['consts'][a['C']])
                 settle([x], False)
-                set_def(n, a['A'], Bin('or', x.expr, kc), x.leaves + [self.nseq()])
+                set_def(n, a['A'], Bin(k[:-1].lower(), x.expr, kc), x.leaves + [self.nseq()])
             elif k == 'GETTABLE':
                 o = rd(n, a['B'])
                 key = rd(n, a['C'])
@@ -393,7 +413,7 @@ class Gen:
                 settle([o, key, v], True)
                 stmts.append(('assign', Idx(o.expr, key.expr), v.expr))
             elif k == 'NEWTABLE':
-                set_def(n, a['A'], Tbl([]), [])
+                set_def(n, a['A'], Tbl([], fromnew=True), [])
             elif k == 'GETUPVAL':
                 set_def(n, a['A'], fn.upvals[a['B']].var, [self.nseq()])
             elif k == 'SETUPVAL':
@@ -483,6 +503,23 @@ class Gen:
                                 rws[i].hint = None
                             rws[i].declared = True
                         stmts.append(('localn', [w if w.uses else None for w in rws], build()))
+            elif k == 'GETVARARGS':
+                A, B = a['A'], a['B']
+                if B == 0:
+                    st['multi'] = Pend(Vararg(), None, [], 'multi')
+                elif B == 2:
+                    set_def(n, A, Vararg(True), [])
+                else:
+                    rws = [fn.def_web[(n.id, A + i)] for i in range(B - 1)]
+                    used = [i for i, w in enumerate(rws) if w.uses]
+                    for w in rws:
+                        w.noinline = True
+                    for w in rws:
+                        if w.declared or w.kind in ('param', 'loop'):
+                            raise NotImplementedError('vararg read into a declared variable in proto %d' % fn.pid)
+                    for i in used:
+                        rws[i].declared = True
+                    stmts.append(('localn', [w if w.uses else None for w in rws], Vararg()))
             elif k in ('NEWCLOSURE', 'DUPCLOSURE'):
                 caps = []
                 for (t, idx) in a['caps']:
@@ -497,11 +534,19 @@ class Gen:
                 tbl = rd(n, a['A'])
                 items = [rd(n, r) for r in n.reads[1:]]
                 first = a['aux']
+                mp = None
+                if a['C'] == 0:
+                    mp = st['multi']
+                    if mp is None:
+                        raise Exception('multret consumer without producer in proto %d' % fn.pid)
+                    st['multi'] = None
                 if not (isinstance(tbl.expr, Tbl) and tbl.web is not None and first == 1 + len(tbl.expr.items)):
                     raise NotImplementedError('SETLIST on a variable table in proto %d' % fn.pid)
-                settle([tbl] + items, False)
-                lv = [l for p in [tbl] + items for l in p.leaves]
-                set_def(n, a['A'], Tbl(tbl.expr.items + [p.expr for p in items]), lv)
+                allp = [tbl] + items + ([mp] if mp is not None else [])
+                settle(allp, False)
+                lv = [l for p in allp for l in p.leaves]
+                new_items = [p.expr for p in items] + ([Multi(mp.expr)] if mp is not None else [])
+                set_def(n, a['A'], Tbl(tbl.expr.items + new_items), lv)
             elif k == 'RETURN':
                 ops = [rd(n, r) for r in n.reads]
                 if a['B'] == 0:

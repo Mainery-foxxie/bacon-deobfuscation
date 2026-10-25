@@ -51,6 +51,7 @@ def parse_dump(text):
             kv = dict(p.split('=') for p in parts[1:])
             d.protos[idx] = dict(idx=idx, np=int(kv['np']), va=int(kv['va']), nup=int(kv['nup']), ms=int(kv['ms']),
                                  entry=int(kv['entry']), df=int(kv['df']), vf=int(kv['vf']), nrec=int(kv['nrec']),
+                                 rs=int(kv.get('rs', 0)),
                                  kids=[], consts={}, recs={})
         elif tag == 'H':
             idx, _, kids = rest.partition(' ')

@@ -122,6 +122,8 @@ def otok(P, name, a):
         return 'CAP:%d' % A
     if name == 'FORGPREP':
         return 'FORGPREP'
+    if name == 'GETVARARGS':
+        return 'GVA:%d' % (B - 1)
     return 'UNK:' + name
 
 
@@ -187,7 +189,7 @@ def dead_loads(dec, pid):
 def orig_nodes(decoder, p, dead=None):
     P = decoder.protos[p]
     dead = dead or set()
-    D = {rid: decoder.decode(p, rid) for rid in P['recs']}
+    D = decoder.decode_all(p)
     nodes = {}
 
     def first(rid):
@@ -370,6 +372,8 @@ def luau_nodes(lines):
             tok = 'NCLO'
         elif op == 'DUPCLOSURE':
             tok = 'DCLO'
+        elif op == 'GETVARARGS':
+            tok = 'GVA:' + toks[1]
         elif op == 'CAPTURE':
             tok = 'CAP:%d' % {'VAL': 0, 'REF': 1, 'UPVAL': 2}[toks[0]]
         elif op == 'RETURN':
@@ -537,11 +541,28 @@ def canon(nodes, entry, relax=None):
 PURE = ('GU', 'IMP:', 'K:', 'LB:', 'LN', 'GT:', 'GT[]', 'GTN:', 'OP:', 'OPR:', 'NOT', 'UNM', 'LEN', 'CONCAT:')
 
 
-def pure_multiset(nodes):
+def reachable(nodes, entry):
+    """ids of the nodes that can be reached from the entry (records nothing jumps to, such as padding, do not count)"""
+    seen = set()
+    todo = [entry]
+    while todo:
+        i = todo.pop()
+        if i is None or i in seen or i not in nodes:
+            continue
+        seen.add(i)
+        todo.append(nodes[i]['nxt'])
+        todo.append(nodes[i]['alt'])
+    return seen
+
+
+def pure_multiset(nodes, entry=None):
     nodes = {k: dict(v) for k, v in nodes.items()}
     expand_or(nodes)
+    live = None if entry is None else reachable(nodes, entry)
     c = collections.Counter()
-    for n in nodes.values():
+    for k, n in nodes.items():
+        if live is not None and k not in live:
+            continue
         t = n['tok']
         if t is not None and t.startswith(PURE):
             c[t] += 1
@@ -581,12 +602,12 @@ def compare(decoder, bc_path, report_path=None):
         on, oe = orig_nodes(decoder, p_, dead)
         A[p_] = canon(on, oe, relax=('LN',))
         A2[p_] = canon(on, oe, relax=PURE)
-        MA[p_] = pure_multiset(on)
+        MA[p_] = pure_multiset(on, oe)
     for f_ in sorted(lf):
         ln_, le = luau_nodes(lf[f_])
         B[f_] = canon(ln_, le, relax=('LN',))
         B2[f_] = canon(ln_, le, relax=PURE)
-        MB[f_] = pure_multiset(ln_)
+        MB[f_] = pure_multiset(ln_, le)
     keyS = lambda s: repr(s)
     keyR = lambda s, m: repr(s) + repr(sorted(m.items()))
     match = {}

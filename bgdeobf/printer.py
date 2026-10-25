@@ -186,6 +186,8 @@ class Printer:
         return '[' + lua_str(k.encode('latin1')) + ']'
 
     def atom(self, e, scope, ind):
+        if isinstance(e, Vararg):
+            return '(...)'
         if isinstance(e, (Bin, Not, Len, Neg)):
             return '(' + self.ex(e, scope, ind, 0) + ')'
         s = self.ex(e, scope, ind, 100)
@@ -194,6 +196,12 @@ class Printer:
                 return '(nil)'
             return '(' + s + ')'
         return s
+
+    def rhs(self, e, scope, ind):
+        """the right-hand side of a one-target assignment: `...` there is already cut down to one value"""
+        if isinstance(e, Vararg):
+            return '...'
+        return self.ex(e, scope, ind)
 
     def ex(self, e, scope, ind, prec=0):
         if isinstance(e, Const):
@@ -220,6 +228,8 @@ class Printer:
             return self.atom(e.obj, scope, ind) + '[' + self.ex(e.key, scope, ind) + ']'
         if isinstance(e, Multi):
             return self.ex(e.e, scope, ind, prec)
+        if isinstance(e, Vararg):
+            return '(...)' if e.single else '...'
         if isinstance(e, Paren):
             return '(' + self.ex(e.e, scope, ind) + ')'
         if isinstance(e, Call):
@@ -453,10 +463,10 @@ class Printer:
                 child = self.child_cache(e)
                 txt = self.render_fn(child, scope, ind, None, prefix='local function ' + nm)
                 return [ind + txt]
-            return [ind + 'local ' + nm + ' = ' + self.ex(e, scope, ind)]
+            return [ind + 'local ' + nm + ' = ' + self.rhs(e, scope, ind)]
         if k == 'assign':
             tgt = self.ex(s[1], scope, ind)
-            return [ind + tgt + ' = ' + self.ex(s[2], scope, ind)]
+            return [ind + tgt + ' = ' + self.rhs(s[2], scope, ind)]
         if k == 'call':
             txt = self.ex(s[1], scope, ind)
             if txt.startswith('('):

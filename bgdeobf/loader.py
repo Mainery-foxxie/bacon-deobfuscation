@@ -110,7 +110,20 @@ class Loader(object):
         mx = [n for n, p in walk(self.root) if is_in(n, 'maxStack')]
         if not mx:
             raise LayoutError('not a Bacon Guard loader: no VM frame found')
-        FRAME = self.encl_fn(mx[0])
+        # the closure factory may build several kinds of closure (newer builds add a precompiled fast path before the
+        # interpreter); the interpreter frame is the one that fetches instruction records
+        frames = []
+        for n in mx:
+            f = self.encl_fn(n)
+            if f is not None and f['vararg'] and not any(f is g for g in frames):
+                frames.append(f)
+        FRAME = None
+        for f in frames:
+            if any(is_in(n, 'fetchInstruction') for n, p in walk(f)):
+                FRAME = f
+                break
+        if FRAME is None and frames:
+            FRAME = frames[0]
         if FRAME is None or not FRAME['vararg']:
             raise LayoutError('unexpected frame function')
         MK = self.encl_fn(FRAME)
@@ -139,6 +152,11 @@ class Loader(object):
         def based(e, name):
             return is_in(e, name) and loc_of(e['expr']) is not None and lkey(loc_of(e['expr'])) == lkey(M)
 
+        # newer builds read the constant table in the factory, before the frame closures are made
+        for s in MK['body']['body']:
+            if s['type'] == 'AstStatLocal' and len(s['vars']) == 1 and len(s['values']) == 1 \
+                    and based(unparen(s['values'][0]), 'constantReader'):
+                self.set_role(s['vars'][0], 'KGET')
         body = FRAME['body']['body']
         self.frame_body = body
         idx = {}
@@ -176,7 +194,7 @@ class Loader(object):
                     idx['NUMPARAMS'] = i
             elif t == 'AstStatLocal' and len(s['vars']) == 1 and len(s['values']) == 0:
                 idx.setdefault('EMPTY', []).append((i, s['vars'][0]))
-        for n, p in walk(FRAME):
+        for n, p in walk(MK):
             if n['type'] == 'AstStatAssign' and len(n['vars']) == 1 and len(n['values']) == 1:
                 tg = unparen(n['vars'][0])
                 v = unparen(n['values'][0])
@@ -196,7 +214,9 @@ class Loader(object):
                 raise LayoutError('loader role not found: ' + need)
         # statements around numParams: `local VARARGS = <module table>` then `local NVAR = 0`
         ip = idx.get('NUMPARAMS')
-        for j in range(ip + 1, min(ip + 6, len(body))):
+        if ip is None:
+            raise LayoutError('loader role not found: NUMPARAMS')
+        for j in range(ip + 1, min(ip + 10, len(body))):
             s = body[j]
             if s['type'] == 'AstStatLocal' and len(s['vars']) == 1 and len(s['values']) == 1:
                 v = unparen(s['values'][0])
@@ -215,8 +235,17 @@ class Loader(object):
                 break
         if 'SIMPLESET' not in self.role_local:
             raise LayoutError('simple-op set not found')
-        # the loop
-        loops = [s for s in body if s['type'] in ('AstStatWhile', 'AstStatRepeat')]
+        # the loop (newer builds wrap it in a `do ... end` block)
+        def find_loops(stmts):
+            out = []
+            for s in stmts:
+                if s['type'] in ('AstStatWhile', 'AstStatRepeat'):
+                    out.append(s)
+                elif s['type'] == 'AstStatBlock':
+                    out.extend(find_loops(s['body']))
+            return out
+
+        loops = find_loops(body)
         if not loops:
             raise LayoutError('interpreter loop not found')
         self.loop = loops[-1]
@@ -340,7 +369,9 @@ class Loader(object):
             if len(ts) >= 2 and all(eq_info(t) is not None for t in ts):
                 self.branches['HOT'] = (body, [int(eq_info(t)[1]) for t in ts])
                 continue
-            if c['type'] == 'AstExprBinary' and c['op'] == 'CompareEq' and unparen(c['left'])['type'] == 'AstExprIndexExpr':
+            # `SIMPLESET[op] == true` (older builds) / `SIMPLESET[op] ~= nil` (newer builds, where the set maps an op to its group)
+            if c['type'] == 'AstExprBinary' and c['op'] in ('CompareEq', 'CompareNe') \
+                    and unparen(c['left'])['type'] == 'AstExprIndexExpr':
                 self.branches['SIMPLE'] = body
                 continue
             raise LayoutError('unrecognised dispatch branch at ' + node['location'])
@@ -364,10 +395,16 @@ class Loader(object):
             raise LayoutError('module tail does not call the proto factory')
         main_local = loc_of(mkcall['args'][0])
         self.set_role(main_local, 'MAIN')
-        ms = mb[-3]
-        if not (ms['type'] == 'AstStatLocal' and unparen(ms['values'][0])['type'] == 'AstExprIndexExpr'):
+        # `local main = PROTOS[MAINIDX]`; newer builds put other statements (precompiled handlers, prefetching) after it
+        dl = self.local_decl.get(lkey(main_local))
+        ms = dl[0] if dl is not None else None
+        mv = None
+        if ms is not None and ms['type'] == 'AstStatLocal':
+            for v_, val_ in zip(ms['vars'], ms['values']):
+                if lkey(v_) == lkey(main_local):
+                    mv = unparen(val_)
+        if mv is None or mv['type'] != 'AstExprIndexExpr' or not any(s is ms for s in mb):
             raise LayoutError('main proto statement not found')
-        mv = unparen(ms['values'][0])
         self.set_role(loc_of(mv['expr']), 'PROTOS')
         self.set_role(loc_of(mv['index']), 'MAINIDX')
         self.tail_stmt = last
@@ -417,22 +454,44 @@ class Loader(object):
         for prm, nm in zip(sf['args'], order):
             self.roles[lkey(prm)] = 'S_' + nm
         self.roles_param_names = dict((lkey(prm), nm) for prm, nm in zip(sf['args'], order))
-        # the handler table used by the dispatcher's final else branch
-        ch, fin = if_chain(sf['body']['body'][0])
-        self.simple_chain = ch
-        if fin is None:
-            raise LayoutError('simple dispatcher fallback missing')
-        wt = None
-        for n, p in walk(fin):
-            if n['type'] == 'AstStatLocal' and len(n['values']) == 1 and unparen(n['values'][0])['type'] == 'AstExprIndexExpr':
-                wt = loc_of(unparen(n['values'][0])['expr'])
-        if wt is None:
+        # the tables the dispatcher reads: `op -> handler function` (older builds: one table behind the ladder of common
+        # ops; newer builds: a table of op groups and one handler table per group)
+        self.simple_tables = self.free_tables(sf)
+        if not any(self.table_has_functions(t) for loc, t in self.simple_tables):
             raise LayoutError('simple handler table not found')
-        self.set_role(wt, 'WTAB')
-        self.simple_final = fin
         # simple ops' own `bxor` of the ladder variable
         # fused-field decode order for pattern parts
         self.xor_stmt = None
+
+    def free_tables(self, fn):
+        """[(local, table constructor)] for the module-level locals that `fn` reads and that are initialised with a table
+        constructor, in order of first reference"""
+        fa, fb = self.src.span(fn)
+        out = []
+        seen = set()
+        for n, p in walk(fn):
+            if n['type'] != 'AstExprLocal':
+                continue
+            loc = n['local']
+            k = lkey(loc)
+            if k in seen:
+                continue
+            seen.add(k)
+            decl = self.local_decl.get(k)
+            if decl is None or decl[1] != 'local':
+                continue
+            sa, sb = self.src.span(decl[0])
+            if fa <= sa and sb <= fb:
+                continue
+            for v, val in zip(decl[0]['vars'], decl[0]['values']):
+                if lkey(v) == k and unparen(val)['type'] == 'AstExprTable':
+                    out.append((v, unparen(val)))
+        return out
+
+    @staticmethod
+    def table_has_functions(tab):
+        return any(it.get('key') is not None and unparen(it['value'])['type'] in ('AstExprFunction', 'AstExprLocal')
+                   for it in tab['items'])
 
     def analyse_fields(self, M):
         """permutations for the fused/simple/capture field readers"""
@@ -499,15 +558,8 @@ def _decl_table(loader, local):
 def extend(loader):
     """derive handler lists for classification"""
     L = loader
-    # simple handler table (op -> function)
-    wt = _decl_table(L, L.role_local['WTAB'])
-    L.wtab_items = _table_items(wt)
-    # simple dispatcher chain ops
-    L.simple_chain_ops = []
-    for cond, body, node in L.simple_chain:
-        e = eq_info(cond)
-        if e is not None:
-            L.simple_chain_ops.append((int(e[1]), body))
+    # tables read by the simple dispatcher: [(local, [(key, value expression)])]
+    L.simple_table_items = [(loc, _table_items(tab)) for loc, tab in L.simple_tables]
     # dedicated tables: key -> function node (via the local function declarations)
     L.ded_decl = {}
     for ti in range(1, 7):

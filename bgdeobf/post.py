@@ -181,6 +181,19 @@ def chain_or(xs):
     return r
 
 
+def flat_and(e):
+    if isinstance(e, Bin) and e.op == 'and':
+        return flat_and(e.l) + flat_and(e.r)
+    return [e]
+
+
+def chain_and(xs):
+    r = xs[0]
+    for x in xs[1:]:
+        r = Bin('and', r, x)
+    return r
+
+
 def try_ternary(s):
     if s[0] != 'if':
         return None
@@ -217,6 +230,16 @@ def try_ternary(s):
                 if len(fa) > k and [sig(x) for x in fa[-k:]] == [sig(x) for x in fb] \
                         and not any(refs(x, X) for x in fa + fb) and not refs(cond, X):
                     return mk_set(X, chain_or([Bin('and', cond, chain_or(fa[:-k]))] + fb), sa[2] or sb[2])
+        # if c then X = T else X = l1 and .. and ln and T end   ->   X = (c or (l1 and .. and ln)) and T   (T shared tail)
+        if len(a_side) == 1 and len(b_side) == 1:
+            sa = single_set(a_side)
+            sb = single_set(b_side, sa[0] if sa else None)
+            if sa and sb:
+                X = sa[0]
+                fb = flat_and(sb[1])
+                if len(fb) > 1 and sig(fb[-1]) == sig(sa[1]) \
+                        and not any(refs(x, X) for x in fb) and not refs(sa[1], X) and not refs(cond, X):
+                    return mk_set(X, Bin('and', Bin('or', cond, chain_and(fb[:-1])), sa[1]), sa[2] or sb[2])
         # if c then X = a else X = b  with truthy constant a
         if len(a_side) == 1 and len(b_side) == 1:
             sa = single_set(a_side)
@@ -458,6 +481,9 @@ def inline_single_use(stmts, cnt):
 
 
 # ------------------------------------------------------------------------------------------------ table constructors
+MAX_TEMPLATE_KEYS = 32      # Luau: a constructor of at most this many record fields is compiled to DUPTABLE; more is NEWTABLE
+
+
 def fold_tables(stmts):
     stmts = list(stmts)
     for i, s in enumerate(stmts):
@@ -499,7 +525,9 @@ def fold_tables(stmts):
                     break
                 added.append((key, t[2]))
                 j += 1
-            if added:
+            # a table the compiler built with NEWTABLE and then filled field by field only came from a constructor when the
+            # constructor was too big for a DUPTABLE template; up to that size, the fields were separate assignments
+            if added and (not tbl.fromnew or len(added) > MAX_TEMPLATE_KEYS):
                 # fill template slots in assignment order, append unknown keys
                 newfields = []
                 tmpl_vals = {}
@@ -552,12 +580,14 @@ def hoist_decls(body):
             here = chain + ((id(stmts), i),)
             k = s[0]
             ws = []
+            # `local function f` already puts f in scope inside its own body
+            selfw = s[1] if k == 'local' and isinstance(s[2], Func) else None
 
             def ex(e):
                 if isinstance(e, Var):
                     ws.append(e.web)
                 elif isinstance(e, Func):
-                    ws.extend(w for w in e.caps if isinstance(w, Web))
+                    ws.extend(w for w in e.caps if isinstance(w, Web) and w is not selfw)
                 elif isinstance(e, E):
                     for c in children(e):
                         ex(c)

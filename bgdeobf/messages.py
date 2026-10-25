@@ -59,8 +59,9 @@ def verdict(info):
     out.append('%d functions, %d VM instructions, %d output lines' % (info.get('protos', 0), info.get('records', 0), info.get('lines', 0)))
     f = info.get('fidelity')
     if f:
-        n, same = f['functions'], f['identical'] + f['reordered']
-        txt = 'Bytecode check: %d/%d functions identical' % (same, n)
+        txt = 'Bytecode check: %d/%d functions identical' % (f['identical'], f['functions'])
+        if f.get('reordered'):
+            txt += ', %d with the same instructions in a different order (only plain reads and calculations moved)' % f['reordered']
         if f.get('cosmetic'):
             txt += ', %d with a cosmetic difference (extra `return`)' % f['cosmetic']
         if f.get('differing'):

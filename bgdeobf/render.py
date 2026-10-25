@@ -15,8 +15,7 @@ def render(decoder, namemap=None, root_pid=None, main_pid=None, annotate=False):
     gen = Gen(dec)
     reserved = set()
     for pid, P in dec.protos.items():
-        for rid in P['recs']:
-            d = decoder.decode(pid, rid)
+        for rid, d in decoder.decode_all(pid).items():
             for name, ins in d['ins']:
                 if name == 'GETIMPORT':
                     k = (ins['aux'] >> 20) & 1023

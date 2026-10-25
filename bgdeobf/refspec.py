@@ -42,6 +42,12 @@ class State(object):
             self.prof.set(i, rng.randrange(0, 4))
         self.tmpl = None
         self.ret = None
+        # the function's extra arguments (a separate generator: the draws above must not change)
+        vr = random.Random(seed ^ 0x5BD1E995)
+        self.nvar = vr.randrange(0, 5)
+        self.varargs = LuaTable()
+        for i in range(self.nvar):
+            self.varargs.set(i + 1, mkU(('va', i)))
         self.iter_nil = False
         self.fixed = set()
         if domain:
@@ -628,6 +634,23 @@ def _setlist(st):
         n = st.top - B + 1
     for i in range(n):
         R(st, A).set(aux + i, R(st, B + i))
+
+
+def _getvarargs_prep(st):
+    st.setf('A', st.rng.randrange(0, 8))
+    st.setf('B', st.rng.randrange(0, 5))
+    st.top = st.rng.randrange(0, 12)
+
+
+@spec('GETVARARGS', prep=_getvarargs_prep, kind='data', top=True)
+def _getvarargs(st):
+    A, B = F(st, 'A'), F(st, 'B')
+    n = B - 1
+    if B == 0:
+        n = st.nvar
+        st.top = A + n - 1
+    for i in range(n):
+        setR(st, A + i, st.varargs.get(i + 1))
 
 
 def _tailcall_prep(st):

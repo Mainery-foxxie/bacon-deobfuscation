@@ -181,6 +181,14 @@ def test_messages():
     assert any('1 with a cosmetic difference' in x for x in v) and v[-1] == 'Note: w'
 
 
+def test_verdict_does_not_count_a_function_with_moved_reads_as_identical():
+    v = messages.verdict({'banner': None, 'protos': 70, 'records': 1, 'lines': 1, 'warnings': [],
+                          'fidelity': {'functions': 70, 'identical': 69, 'reordered': 1, 'cosmetic': 0, 'differing': []}})
+    line = [x for x in v if x.startswith('Bytecode check')][0]
+    assert line.startswith('Bytecode check: 69/70 functions identical, 1 with the same instructions in a different order'), line
+    assert 'differ' not in line.replace('different', '')
+
+
 def test_verdict_explains_an_annotated_copy():
     base = {'banner': None, 'protos': 1, 'records': 1, 'lines': 1, 'warnings': [], 'syntax_ok': True}
     plain = messages.verdict(base)

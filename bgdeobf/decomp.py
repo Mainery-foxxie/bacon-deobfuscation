@@ -59,10 +59,11 @@ class Not(E):
 
 
 class Tbl(E):
-    def __init__(s, items, fields=None, pending=None):
+    def __init__(s, items, fields=None, pending=None, fromnew=False):
         s.items = items
         s.fields = fields or []       # [(key str, value E)] from a DUPTABLE template (constant values)
         s.pending = pending or []     # template keys still to be assigned (in template order)
+        s.fromnew = fromnew           # made by NEWTABLE: the fields assigned right after were not written as a constructor
 
 
 class Func(E):
@@ -73,6 +74,11 @@ class Func(E):
 class Multi(E):  # wrapper marking a multi-value (call) expression used as last argument
     def __init__(s, e):
         s.e = e
+
+
+class Vararg(E):  # `...`; `single` marks a value that was cut down to one (a plain GETVARARGS, printed `(...)`)
+    def __init__(s, single=False):
+        s.single = single
 
 
 class Len(E):
@@ -104,7 +110,7 @@ def fmt_num(v):
         return '(0/0)'
     if v in (math.inf, -math.inf):
         return 'math.huge' if v > 0 else '-math.huge'
-    if v == int(v) and abs(v) < 1e15:
+    if v == int(v) and abs(v) < 2 ** 53:
         return str(int(v))
     return repr(v)
 
@@ -187,6 +193,7 @@ class Block:
 COND_KINDS = ('JUMPIFNOT', 'JUMPIF', 'JUMPIFEQ', 'JUMPIFNOTEQ', 'JUMPIFLE', 'JUMPIFLT', 'JUMPIFNOTLT', 'JUMPIFNOTLE',
               'JUMPXEQK', 'JUMPXEQKB', 'JUMPXEQKNIL')
 TERM_KINDS = ('RETURN', 'FORNPREP', 'FORNLOOP', 'FORGPREP', 'FORGLOOP') + COND_KINDS
+ARITH_RR = {'ADD': '+', 'SUB': '-', 'MUL': '*', 'DIV': '/', 'MOD': '%', 'POW': '^', 'IDIV': '//'}
 ARITH_RK = ('SUBRK', 'DIVRK')
 ARITH_K = ('ADDK', 'SUBK', 'MULK', 'DIVK', 'MODK', 'POWK', 'IDIVK')
 
@@ -216,7 +223,7 @@ class Decompiler:
     def build(self, fn):
         P, protos = fn.P, self.protos
         pid = fn.pid
-        D = {rid: self.decoder.decode(pid, rid) for rid in P['recs']}
+        D = self.decoder.decode_all(pid)
         fn.D = D
         consumed = set()
         recnodes = {}      # rid -> list of Nodes (ins..., terminator?)
@@ -332,10 +339,13 @@ class Decompiler:
                 n.reads, n.writes = [a['B']], [a['A'] + 1, a['A']]
             elif k == 'SETUPVAL':
                 n.reads = [a['A']]
-            elif k in ('ADD', 'SUB', 'MUL', 'OR', 'GETTABLE'):
+            elif k in ARITH_RR or k in ('OR', 'AND', 'GETTABLE'):
                 n.reads, n.writes = [a['B'], a['C']], [a['A']]
-            elif k in ('LENGTH', 'NOT', 'MINUS', 'GETTABLEN', 'ORK'):
+            elif k in ('LENGTH', 'NOT', 'MINUS', 'GETTABLEN', 'ORK', 'ANDK'):
                 n.reads, n.writes = [a['B']], [a['A']]
+            elif k == 'GETVARARGS':
+                # B == 0 produces as many values as the call received, handed to the next consumer (like a CALL with C == 0)
+                n.writes = [a['A'] + i for i in range(a['B'] - 1)] if a['B'] > 0 else []
             elif k == 'CONCAT':
                 n.reads, n.writes = list(range(a['B'], a['C'] + 1)), [a['A']]
             elif k == 'DUPTABLE':
@@ -358,7 +368,9 @@ class Decompiler:
                 n.reads = [a['A']]
                 n.writes = [a['A']]
             elif k in ('NEWCLOSURE', 'DUPCLOSURE'):
-                n.reads = [idx for (t, idx) in a['caps'] if t in (0, 1)]
+                # the closure is stored in its register before its captures are taken, so a capture of that register
+                # is the closure itself (a recursive `local function`), not a read of the register's previous value
+                n.reads = [idx for (t, idx) in a['caps'] if t in (0, 1) and idx != a['A']]
                 n.writes = [a['A']]
             elif k == 'CALL':
                 pass
@@ -402,7 +414,7 @@ class Decompiler:
                         if len(cur.preds) != 1:
                             raise Exception('multret consumer without single pred chain')
                         cur = cur.preds[0]
-                        if cur.kind == 'CALL' and cur.a['C'] == 0:
+                        if (cur.kind == 'CALL' and cur.a['C'] == 0) or (cur.kind == 'GETVARARGS' and cur.a['B'] == 0):
                             top = cur.a['A']
                             break
                         if cur.kind in TERM_KINDS:
@@ -556,6 +568,10 @@ class Decompiler:
                         movers.append((n, prev))
                 for r in n.writes:
                     cur[r] = frozenset([node_defs[(n.id, r)]])
+                if n.kind in ('NEWCLOSURE', 'DUPCLOSURE'):
+                    for (t, idx) in n.a['caps']:
+                        if t in (0, 1) and idx == n.a['A']:
+                            usedefs[(n.id, idx)] = frozenset([node_defs[(n.id, idx)]])
         if movers:
             readers = collections.defaultdict(list)
             for (nid, r), s in usedefs.items():

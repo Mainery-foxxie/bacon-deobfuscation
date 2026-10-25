@@ -43,8 +43,8 @@ function __DUMPER()
     local P = protos[idx]
     local f = mk(P, {})
     f(__DUMP)
-    emit(string.format("P %d np=%d va=%d nup=%d ms=%d entry=%d df=%d vf=%d nrec=%d", idx, P.numParams, P.isVararg and 1 or 0,
-      P.numUpvalues, P.maxStack, P.entry, P.dispatchFormat, P.vmFamily, P.instructionCount))
+    emit(string.format("P %d np=%d va=%d nup=%d ms=%d entry=%d df=%d vf=%d nrec=%d rs=%d", idx, P.numParams, P.isVararg and 1 or 0,
+      P.numUpvalues, P.maxStack, P.entry, P.dispatchFormat, P.vmFamily, P.instructionCount, P.regShift or 0))
     local kids = {}
     for i = 0, 1000000 do
       local c = P.children[i]
