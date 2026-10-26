@@ -60,8 +60,10 @@ class FakeDecoder(object):
         d = dict(kind=op, sem=0, ins=[], ctrl=None, nxt=rid + 1, alt=NONE, rid=rid)
         if op == 'RETURN':
             d['ctrl'], d['nxt'] = (op, a), NONE
-        elif op in COND or op == 'JUMP':
+        elif op in COND or op in ('JUMP', 'FORNPREP', 'FORNLOOP', 'FORGLOOP'):
             d['ctrl'], d['alt'] = (op, a), to
+        elif op == 'FORGPREP':
+            d['ins'], d['ctrl'], d['alt'] = [(op, a)], ('JUMP', a), to
         else:
             d['ins'] = [(op, a)]
         return d
@@ -379,4 +381,223 @@ def test_a_shared_tail_in_an_or_and_chain_becomes_one_expression():
         I('RETURN', A=0, B=1),
     ], [s('a'), s('b'), s('c'), s('game'), s('print')])
     assert re.search(r'= \(a or b and c\) and game$', text, re.M), text
+    assert report['differing'] == [], report['report']
+
+
+# ------------------------------------------------------------------------------------------------ shapes from a second v0.43.0 build
+def test_a_call_cut_down_to_one_value_keeps_its_parentheses_in_the_last_place():
+    """A call in the last place of an argument list, a table or a return passes on every result unless the compiler asked
+    for one (CALL with C=2), so `print(a, (f()))`, `{f(), (f())}` and `return (f())` need their parentheses and
+    `print(a, f())` must not get any"""
+    consts = [s('print'), s('a'), s('f')]
+    one, many = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('GETIMPORT', A=1, aux=import_aux(1)),
+        I('GETIMPORT', A=2, aux=import_aux(2)),
+        I('CALL', A=2, B=1, C=2),
+        I('CALL', A=0, B=3, C=1),                    # print(a, (f()))
+        I('RETURN', A=0, B=1),
+    ], consts), roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('GETIMPORT', A=1, aux=import_aux(1)),
+        I('GETIMPORT', A=2, aux=import_aux(2)),
+        I('CALL', A=2, B=1, C=0),
+        I('CALL', A=0, B=0, C=1),                    # print(a, f())
+        I('RETURN', A=0, B=1),
+    ], consts)
+    assert re.search(r'^print\(a, \(f\(\)\)\)$', one[0], re.M), one[0]
+    assert re.search(r'^print\(a, f\(\)\)$', many[0], re.M), many[0]
+    table = roundtrip([
+        I('NEWTABLE', A=0, C=2),
+        I('GETIMPORT', A=1, aux=import_aux(2)),
+        I('CALL', A=1, B=1, C=2),
+        I('GETIMPORT', A=2, aux=import_aux(2)),
+        I('CALL', A=2, B=1, C=2),
+        I('SETLIST', A=0, B=1, C=3, aux=1),          # {f(), (f())}
+        I('RETURN', A=0, B=2),
+    ], consts)
+    assert re.search(r'^return \{f\(\), \(f\(\)\)\}$', table[0], re.M), table[0]
+    result = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(2)),
+        I('CALL', A=0, B=1, C=2),
+        I('RETURN', A=0, B=2),                       # return (f())
+    ], consts)
+    assert re.search(r'^return \(f\(\)\)$', result[0], re.M), result[0]
+    for text, bytecode, report in (one, many, table, result):
+        assert report['differing'] == [], report['report']
+
+
+def test_a_value_made_by_and_that_is_tested_again_afterwards_stays_a_local():
+    """`local v = a and b` then `if not v then ... end` builds the value in a register and tests that register; the
+    compiler never does that for `if not (a and b)`, which is a chain of direct jumps.  One expression in the `if` would
+    compile to those direct jumps instead"""
+    consts = [s('a'), s('b'), s('print'), s('x')]
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('JUMPIFNOT', to=3, A=0),                   # local v = a and b
+        I('GETIMPORT', A=0, aux=import_aux(1)),
+        I('JUMPIF', to=7, A=0),                      # if not v then
+        I('GETIMPORT', A=1, aux=import_aux(2)),
+        I('LOADK', A=2, rf=3),
+        I('CALL', A=1, B=2, C=1),                    #   print("x")
+        I('RETURN', A=0, B=1),                       # end
+    ], consts)
+    m = re.search(r'^local (\w+) = a and b$', text, re.M)
+    assert m and re.search(r'^if not %s then$' % m.group(1), text, re.M), text
+    assert report['differing'] == [], report['report']
+    direct, _, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('JUMPIFNOT', to=4, A=0),                   # if not (a and b) then
+        I('GETIMPORT', A=0, aux=import_aux(1)),
+        I('JUMPIF', to=7, A=0),
+        I('GETIMPORT', A=0, aux=import_aux(2)),
+        I('LOADK', A=1, rf=3),
+        I('CALL', A=0, B=2, C=1),                    #   print("x")
+        I('RETURN', A=0, B=1),                       # end
+    ], consts)
+    assert not re.search(r'^local ', direct, re.M), direct
+    assert report['differing'] == [], report['report']
+
+
+def metatable_program(template):
+    """`return function(p1) return setmetatable({}, {__index = <closure>, __tostring = <closure>}) end`; the second table
+    is a template (DUPTABLE) or, when the compiler did not make one, a NEWTABLE filled by assignments"""
+    second = I('DUPTABLE', A=3, rf=3) if template else I('NEWTABLE', A=3, B=2)
+    return {
+        0: dict(code=[I('DUPCLOSURE', A=0, rf=0), I('RETURN', A=0, B=2)], consts={0: num(1)}),
+        1: dict(code=[
+            I('NEWTABLE', A=2),                      # the first argument
+            second,                                  # the second argument
+            I('NEWCLOSURE', A=4, rf=0),
+            I('CAPTURE', A=0, B=0),
+            I('SETTABLEKS', A=4, B=3, aux=0),        # __index = function() return p1 end
+            I('NEWCLOSURE', A=4, rf=1),
+            I('CAPTURE', A=0, B=0),
+            I('SETTABLEKS', A=4, B=3, aux=1),        # __tostring = function() return p1 end
+            I('GETIMPORT', A=1, aux=import_aux(2)),
+            I('CALL', A=1, B=3, C=0),
+            I('RETURN', A=1, B=0),
+        ], consts={0: s('__index'), 1: s('__tostring'), 2: s('setmetatable'), 3: ('t', [(0, -1), (1, -1)])},
+            np=1, kids=[2, 3]),
+        2: dict(code=[I('GETUPVAL', A=0, B=0), I('RETURN', A=0, B=2)], consts={}, nup=1),
+        3: dict(code=[I('GETUPVAL', A=0, B=0), I('RETURN', A=0, B=2)], consts={}, nup=1),
+    }
+
+
+def test_two_tables_that_are_both_arguments_are_made_in_the_order_they_were_compiled():
+    """With the second table filled by assignments the compiler made `{}` first and the other table after it; both are
+    locals here (a table that is built field by field cannot sit inside the call), so the first one is declared first"""
+    text, bytecode, report = roundtrip_protos(metatable_program(template=False))
+    m = re.search(r'^\s*local (\w+) = \{\}\n\s*local (\w+) = \{\}\n', text, re.M)
+    assert m, text
+    assert re.search(r'return setmetatable\(%s, %s\)' % m.groups(), text), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_table_template_filled_in_for_an_argument_is_folded_back_behind_the_empty_table_before_it():
+    """With a template the second table is one constructor, so the whole thing is still `setmetatable({}, {...})`"""
+    text, bytecode, report = roundtrip_protos(metatable_program(template=True))
+    assert re.search(r'return setmetatable\(\{\}, \{__index = function', text), text
+    assert 'local' not in text.replace('local function', ''), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_list_constructor_with_nested_tables_filled_in_afterwards_is_one_expression():
+    """`{ {words = {"a", "b"}, paths = {"c"}}, {words = {"d"}, paths = {"e", "f"}} }`: the outer table is filled by one
+    SETLIST at the end, after statements that complete the inner tables.  It must stay a pending value (the unfinished
+    constructor), not become a variable that SETLIST can no longer write into"""
+    text, bytecode, report = roundtrip([
+        I('NEWTABLE', A=0, C=2),
+        I('DUPTABLE', A=1, rf=9),
+        I('NEWTABLE', A=2, C=2),
+        I('LOADK', A=3, rf=2),
+        I('LOADK', A=4, rf=3),
+        I('SETLIST', A=2, B=3, C=3, aux=1),
+        I('SETTABLEKS', A=2, B=1, aux=0),            # words = {"a", "b"}
+        I('NEWTABLE', A=2, C=1),
+        I('LOADK', A=3, rf=4),
+        I('SETLIST', A=2, B=3, C=2, aux=1),
+        I('SETTABLEKS', A=2, B=1, aux=1),            # paths = {"c"}
+        I('DUPTABLE', A=2, rf=9),
+        I('NEWTABLE', A=3, C=1),
+        I('LOADK', A=4, rf=5),
+        I('SETLIST', A=3, B=4, C=2, aux=1),
+        I('SETTABLEKS', A=3, B=2, aux=0),            # words = {"d"}
+        I('NEWTABLE', A=3, C=2),
+        I('LOADK', A=4, rf=6),
+        I('LOADK', A=5, rf=7),
+        I('SETLIST', A=3, B=4, C=3, aux=1),
+        I('SETTABLEKS', A=3, B=2, aux=1),            # paths = {"e", "f"}
+        I('SETLIST', A=0, B=1, C=3, aux=1),
+        I('RETURN', A=0, B=2),
+    ], [s('words'), s('paths'), s('a'), s('b'), s('c'), s('d'), s('e'), s('f'), s('g'), ('t', [(0, -1), (1, -1)])])
+    assert 'words = {"a", "b"}' in text and 'paths = {"e", "f"}' in text, text
+    assert re.search(r'^return \{', text, re.M), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_list_constructor_around_a_table_built_by_assignments_is_still_one_constructor():
+    """`{ t }` where `t` is a NEWTABLE that fields are assigned into: those assignments come before the SETLIST of the
+    outer table, but they must not turn the outer table into a variable (SETLIST cannot write into one).  The outer table
+    is made after the inner one here, which the bytecode check reports, but the decompiler must not fail"""
+    text, bytecode, report = roundtrip([
+        I('NEWTABLE', A=0, C=1),
+        I('NEWTABLE', A=1),
+        I('LOADN', A=2, rf=1),
+        I('SETTABLEKS', A=2, B=1, aux=0),            # t.x = 1
+        I('SETLIST', A=0, B=1, C=2, aux=1),
+        I('RETURN', A=0, B=2),
+    ], [s('x')])
+    assert re.search(r'^return \{\w+\}$', text, re.M), text
+
+
+# ------------------------------------------------------------------------------------------------ loops
+def test_a_while_loop_that_ends_with_a_generic_for_loop():
+    """`while #list > 0 do local x = table.remove(list, 1) for _, v in iter(x) do print(v) end end`: when the for loop is
+    done it goes straight back to the top of the while loop, which the loop detection used to ignore (it never found the
+    while loop and the structuring went on for ever)"""
+    text, bytecode, report = roundtrip([
+        I('GETVARARGS', A=0, B=2),                   # local list = ...
+        I('LENGTH', A=1, B=0),                       # while #list > 0 do
+        I('LOADN', A=2, rf=0),
+        I('JUMPIFNOTLT', to=17, A=2, aux=1),
+        I('GETIMPORT', A=1, aux=import_aux(0, 1)),
+        I('MOVE', A=2, B=0),
+        I('LOADN', A=3, rf=1),
+        I('CALL', A=1, B=3, C=2),                    #   local x = table.remove(list, 1)
+        I('GETIMPORT', A=2, aux=import_aux(2)),
+        I('MOVE', A=3, B=1),
+        I('CALL', A=2, B=2, C=4),
+        I('FORGPREP', to=15, A=2),                   #   for _, v in iter(x) do
+        I('GETIMPORT', A=7, aux=import_aux(3)),
+        I('MOVE', A=8, B=6),
+        I('CALL', A=7, B=2, C=1),                    #     print(v)
+        I('FORGLOOP', to=12, A=2, aux=2),            #   end
+        I('JUMP', to=1),                             # end
+        I('RETURN', A=0, B=1),
+    ], [s('table'), s('remove'), s('iter'), s('print')])
+    assert re.search(r'^while #\w+ > 0 do$', text, re.M), text
+    assert re.search(r'^\tfor _, \w+ in iter\(\w+\) do$', text, re.M), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_while_loop_that_ends_with_a_numeric_for_loop():
+    text, bytecode, report = roundtrip([
+        I('GETVARARGS', A=0, B=2),                   # local n = ...
+        I('LOADN', A=1, rf=0),                       # while n > 0 do
+        I('JUMPIFNOTLT', to=13, A=1, aux=0),
+        I('SUBK', A=0, B=0, C=1),                    #   n = n - 1
+        I('LOADN', A=3, rf=1),
+        I('LOADN', A=1, rf=3),
+        I('LOADN', A=2, rf=1),
+        I('FORNPREP', to=12, A=1),                   #   for i = 1, 3 do
+        I('GETIMPORT', A=4, aux=import_aux(0)),
+        I('MOVE', A=5, B=3),
+        I('CALL', A=4, B=2, C=1),                    #     print(i)
+        I('FORNLOOP', to=8, A=1),                    #   end
+        I('JUMP', to=1),                             # end
+        I('RETURN', A=0, B=2),                       # return n
+    ], [s('print'), num(1)])
+    assert re.search(r'^while \w+ > 0 do$', text, re.M), text
+    assert re.search(r'^\tfor \w+ = 1, 3 do$', text, re.M), text
     assert report['differing'] == [], report['report']

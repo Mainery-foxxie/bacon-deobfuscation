@@ -28,6 +28,9 @@ def tail(text):
     ('local module = make()\nlocal host = {}\nlocal env = getfenv()\nreturn module(host, env)(...)',
      '__DUMPER(module(host, env))'),
     ('local module = make()\nlocal a, b = 1, 2\nreturn module( a , b )(...)', '__DUMPER(module( a , b ))'),
+    # the results of that call are kept in a table first, and the first one is called: the module has run by then
+    ('local module = make()\nlocal host = {}\nlocal env = getfenv()\nlocal results = {module(host, env)}\n'
+     'return results[1](...)', '__DUMPER()'),
 ])
 def test_known_tail_shapes(text, expected):
     assert tail(text) == expected
@@ -40,6 +43,9 @@ def test_known_tail_shapes(text, expected):
     ('local t = {}\nreturn t.run()(...)', 'tail not recognised'),
     ('local run = make()\nreturn run(...), 2', 'tail not recognised'),
     ('local function run(...) print(1) end\nreturn run(...)', 'runner not recognised'),
+    ('local function t() end\nreturn t[1](...)', 'runner not recognised'),
+    ('local i = 1\nlocal t = {}\nreturn t[i](...)', 'tail not recognised'),
+    ('return results[1](...)', 'tail not recognised'),
 ])
 def test_unknown_tail_shapes_are_refused(text, message):
     with pytest.raises(LayoutError) as e:

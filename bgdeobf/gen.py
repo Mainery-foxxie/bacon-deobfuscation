@@ -767,7 +767,11 @@ class Gen:
                 stack.pop()
         loops = {}
         for (b, h) in back:
-            if blocks[b].term[0] in ('fornloop', 'forgloop') or blocks[h].term[0] in ('fornloop', 'forgloop'):
+            t = blocks[b].term
+            # the edge a for loop takes to run its body again is the loop itself; the edge it takes when it is done can
+            # still go back to the top of an enclosing loop (a for loop that ends the body of a while loop)
+            if (t[0] == 'fornloop' and h == t[1]) or (t[0] == 'forgloop' and h == t[2]) \
+                    or blocks[h].term[0] in ('fornloop', 'forgloop'):
                 continue
             body = {h}
             work = [b]
