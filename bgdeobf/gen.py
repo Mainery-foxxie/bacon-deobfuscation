@@ -5,6 +5,50 @@ from .decomp import *
 EXIT = -1
 ARITH_OPS = {'ADDK': '+', 'SUBK': '-', 'MULK': '*', 'DIVK': '/', 'MODK': '%', 'POWK': '^', 'IDIVK': '//', 'SUBRK': '-', 'DIVRK': '/'}
 
+# Every global the Real executor defines, copied from its reference (https://docs.projectreal.gg/en, 24 categories,
+# 232 function pages): the functions, their aliases and the library tables (`crypt`, `json`, `Drawing`, ...).  Methods
+# such as `game:HttpGet` or `window:Button` are not globals and are not listed.
+EXECUTOR_GLOBALS = set('''
+    cache cloneref compareinstances
+    crypt base64_decode base64_encode lz4compress lz4decompress
+    appendfile delfile delfolder getcustomasset isfile isfolder listfiles loadfile makefolder openfiledialog
+    openfilesdialog openfolderdialog readfile savefiledialog writefile
+    json
+    rconsoleclear rconsolecreate rconsoledestroy rconsoleerr rconsolehide rconsoleinfo rconsoleinput rconsolename
+    rconsoleprint rconsoleshow rconsolewarn
+    Drawing cleardrawcache getrenderproperty isrenderobj setrenderproperty
+    imgui
+    isrbxactive keyclick keypress keyrelease mouse1click mouse1press mouse1release mouse2click mouse2press
+    mouse2release mousemoveabs mousemoverel mousescroll
+    fireclickdetector fireproximityprompt firetouchinterest getcallbackvalue gethui getinstances getnilinstances
+    isnetworkowner
+    gethiddenproperty isscriptable sethiddenproperty setscriptable
+    decompile dumpstring getcallingscript getinstancesbyclass getinstancesofclass getloadedmodules getmenv
+    getreferencedby getrunningscripts getscriptbytecode getscriptclosure getscripthash getscripts getscriptthread
+    getsenv loadstring
+    cansignalreplicate firesignal getconnections getsignalarguments getsignalargumentsinfo getsignalwhitelist
+    replicatesignal
+    WebSocket
+    create_comm_channel get_comm_channel getactorfromthread getactors getactorthreads getcurrentactor getdeletedactors
+    isparallel checkparallel run_on_actor runonactor run_on_thread runonthread
+    checkcaller clonefunction comparefunctions comparefunction getfunctionhash hookfunction hookmetamethod iscclosure
+    isexecutorclosure isfunctionhooked ishiddenstack isstackhidden islclosure isluaclosure isnewcclosure newcclosure
+    newlclosure restorefunction sethiddenstack setstackhidden
+    getconstant getconstants getinfo getproto getprotos getreg getstack getupvalue getupvalues isvalidlevel validlevel
+    setconstant setstack setupvalue
+    filtergc getgc get_gc_objects getgenv getrenv getscriptglobals gettenv getstateenv setclipboard toclipboard
+    setrbxclipboard
+    getmetafield getnamecallmethod get_namecall_method getrawmetatable hasmetafield hasmetatable isreadonly
+    makereadonly makewriteable setnamecallmethod set_namecall_method setrawmetatable setreadonly
+    getscriptfromthread getthreadidentity isourthread is_our_thread setthreadidentity
+    disassemble
+    clear_teleport_queue getexecutorname getexecutorversion getfflag getfflagtype getfpscap gethwid identifyexecutor
+    info messagebox queue_on_teleport request setfflag setfpscap
+    RakNet
+    Signal
+    saveinstance
+'''.split())
+
 ROBLOX_GLOBALS = {'game', 'workspace', 'script', 'math', 'string', 'table', 'Instance', 'Enum', 'task', 'print', 'warn', 'error',
                   'pcall', 'xpcall', 'tostring', 'tonumber', 'type', 'typeof', 'pairs', 'ipairs', 'next', 'select', 'unpack',
                   'require', 'wait', 'spawn', 'delay', 'tick', 'time', 'os', 'utf8', 'bit32', 'coroutine', 'debug', 'buffer',
@@ -13,7 +57,7 @@ ROBLOX_GLOBALS = {'game', 'workspace', 'script', 'math', 'string', 'table', 'Ins
                   'getmetatable', 'assert', 'shared', '_G', '_VERSION', 'Drawing', 'syn', 'request', 'http_request',
                   'isfile', 'readfile', 'writefile', 'identifyexecutor', 'gethui', 'hookfunction', 'newcclosure',
                   'clonefunction', 'getrawmetatable', 'setreadonly', 'islclosure', 'checkcaller', 'fireclickdetector',
-                  'firetouchinterest', 'getconnections', 'setclipboard', 'queue_on_teleport'}
+                  'firetouchinterest', 'getconnections', 'setclipboard', 'queue_on_teleport'} | EXECUTOR_GLOBALS
 
 
 # services a script usually fetches through its own small wrapper (`local function getService(name) ... end`)

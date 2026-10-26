@@ -94,12 +94,13 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
 `python -m bgdeobf --check` shows whether the tools can run.
 
 ## What has and hasn't been tested
-- Tested on 9 real builds (Bacon Guard v0.42.0 "The Morgue Shift", ClarksCicaverse, TommyPlay, FORGE Protection build
+- Tested on 10 real builds (Bacon Guard v0.42.0 "The Morgue Shift", ClarksCicaverse, TommyPlay, FORGE Protection build
   03d3bec6a6b0, a build with no banner that keeps the program in compressed pages, and Bacon Guard v0.43.0 | FORGE
-  Protection builds baf6ea30ebd0, cf776ebed029, a7c98b93da5b and af206410f1dd). Bytecode check: 168/168, 23/24, 172/172,
-  93/93, 172/172, 69/70, 62/62, 77/77 and 56/58 functions identical. The 24th Cic function differs by an extra `return`
-  after `error()` (same behavior); one function of the first v0.43.0 script and two of the last one have the same
-  instructions with a plain arithmetic step or constant load in a different place (no call, write or jump moved).
+  Protection builds baf6ea30ebd0, cf776ebed029, a7c98b93da5b, af206410f1dd and cb5687cb3df4). Bytecode check: 168/168,
+  23/24, 172/172, 93/93, 172/172, 69/70, 62/62, 77/77, 56/58 and 83/85 functions identical. The 24th Cic function
+  differs by an extra `return` after `error()` (same behavior); in three of the v0.43.0 scripts one or two functions
+  have the same instructions with a plain read, arithmetic step or constant load in a different place (no call, write
+  or jump moved).
   Other builds may use patterns that are not covered yet; read the error message. The protector changes small details
   between builds (for example how the loader ends), so a new build can fail with a clear error message until that
   detail is added.
@@ -107,11 +108,15 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
   can be one record that holds the whole loop, and a closure record carries its own capture list. All three are handled.
   Not handled: a closure whose captures are separate records in that newer layout (the sample has none), and `...`
   assigned into variables that were declared earlier (raises an error instead of guessing).
-- Variable names are only guesses; the result is checked for shape, not for names.
+- Variable names are only guesses; the result is checked for shape, not for names. A name is never the same as a
+  Roblox or executor function, so a variable can not hide a function the script calls (`local readfile = readfile(x)`
+  is written `local readfile2 = readfile(x)`). `EXECUTOR_GLOBALS` in `gen.py` holds every global of the Real executor
+  from https://docs.projectreal.gg/en (232 functions, their aliases and library tables such as `crypt` and `json`);
+  every global the script itself reads is kept free as well, whoever defines it.
 - Tables follow the bytecode: a constructor the compiler turned into a template (`{a = 1, b = f()}`) is printed as one,
   and a table it built field by field is printed as `local t = {}` plus assignments. That is the same program but can
   look less tidy than the original source (for example two tables that were arguments of one call become two locals).
-- About 230 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
+- About 240 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
   `tests/samples/` is empty): sandbox limits, damaged/truncated files, hard timeout, queue, the URL downloader (local
   server + fake resolver), the decompiler and the decoder on small hand-assembled programs (these need no protected
   script), and the whole bot flow (slash, menu, `!uwu`) using the **real discord.py library with a fake Discord network**.
