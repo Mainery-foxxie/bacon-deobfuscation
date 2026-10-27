@@ -121,6 +121,52 @@ def compile_check(text, timeout=60):
     return True, '', r.stdout.decode('latin1')
 
 
+def detect(data, max_bytes=3 * 1024 * 1024):
+    """Is `data` a Bacon Guard / FORGE script, and which build?  Only the loader is parsed (luau-ast); nothing is run, not
+    even in the sandbox.  Returns dict(kind='bacon_guard' | 'unknown', supported=bool, confidence=0..1, label, banner, detail):
+    1.0 = the VM layout of the loader was recognized, 0.5 = the banner is there but the loader is not (damaged, truncated,
+    or a build this tool does not know), 0.0 = neither.  Raises EngineError('setup' | 'timeout') when the Luau tools fail."""
+    def answer(kind, confidence, label, banner, detail, supported=False):
+        return dict(kind=kind, supported=supported, confidence=confidence, label=label, banner=banner, detail=scrub(detail))
+
+    if not data or not data.strip():
+        return answer('unknown', 0.0, 'empty file', None, 'the file is empty')
+    if len(data) > max_bytes:
+        return answer('unknown', 0.0, 'file too large', None, 'the file is larger than %d bytes' % max_bytes)
+    if b'\x00' in data[:4096]:
+        return answer('unknown', 0.0, 'not a text script', None, 'the file looks like binary / bytecode')
+    text = normalize_source(data)
+    m = BANNER.search(text[:4000])
+    banner = dict(version=m.group(1), protection=m.group(2), build=m.group(3)) if m else None
+    name = 'Bacon Guard v%s (%s), build %s' % (banner['version'], banner['protection'], banner['build']) if banner else None
+    problem = None
+    remarks = []
+    try:
+        L = Loader(text)
+        extend(L)
+        remarks = _check_perms(L)
+    except LayoutError as e:
+        problem = 'the loader layout is not recognized: %s' % e
+    except LuauSyntax as e:
+        problem = 'not valid Luau (damaged or truncated?): %s' % e
+    except LuauMissing as e:
+        raise EngineError('setup', str(e))
+    except LuauTimeout as e:
+        raise EngineError('timeout', str(e))
+    except LuauError as e:
+        problem = 'the script could not be analysed: %s' % e
+    except RecursionError:
+        problem = 'the script is too deeply nested to analyse'
+    except (KeyError, IndexError, TypeError, AssertionError, AttributeError, ValueError) as e:
+        problem = 'unexpected loader structure (%s)' % type(e).__name__
+    if problem is None:
+        return answer('bacon_guard', 1.0, name or 'Bacon Guard-style VM (no banner)', banner,
+                      '; '.join(['the VM layout of the loader was recognized'] + remarks), supported=True)
+    if banner:
+        return answer('bacon_guard', 0.5, name, banner, 'the banner is there, but ' + problem)
+    return answer('unknown', 0.0, 'not a Bacon Guard / FORGE script', None, problem)
+
+
 def deobfuscate(data, opts=None, progress=None):
     opts = opts or Options()
     note = progress or (lambda s: None)

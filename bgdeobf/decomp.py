@@ -547,8 +547,33 @@ class Decompiler:
             if ra != rb:
                 uf[rb] = ra
 
+        # Inside a for loop every temporary lives above the loop's own registers, so a write to a register below them
+        # (`flag = true` for a `local flag` declared before the loop) is an assignment to that variable, even when
+        # the new value never meets the old one at a read (`flag = true return flag`)
+        loop_base = {}
+        for n in nodes:
+            if n.kind not in ('FORNPREP', 'FORGPREP') or not n.succ:
+                continue
+            if n.kind == 'FORNPREP':
+                body, leave = n.succ[0], n.succ[1]
+            else:
+                lp = n.succ[0]
+                if lp.kind != 'FORGLOOP' or len(lp.succ) != 2:
+                    continue
+                leave, body = lp.succ
+            todo = [body]
+            seen = set()
+            while todo:
+                m = todo.pop()
+                if m is leave or m.id in seen:
+                    continue
+                seen.add(m.id)
+                todo.extend(m.succ)
+            for i in seen:
+                loop_base[i] = max(loop_base.get(i, 0), n.a['A'])
         usedefs = {}   # (node id, reg) -> set of def ids
         movers = []    # (MOVE node into a lower register, defs of that register reaching it)
+        assigns = []   # (node, register, defs reaching it): writes to a variable declared before the enclosing loop
         for b in blocks:
             cur = dict(IN[b.id])
             for n in b.nodes:
@@ -566,6 +591,10 @@ class Decompiler:
                     prev = cur.get(n.a['A'])
                     if prev:
                         movers.append((n, prev))
+                if n.id in loop_base:
+                    for r in n.writes:
+                        if r < loop_base[n.id] and cur.get(r):
+                            assigns.append((n, r, cur[r]))
                 for r in n.writes:
                     cur[r] = frozenset([node_defs[(n.id, r)]])
                 if n.kind in ('NEWCLOSURE', 'DUPCLOSURE'):
@@ -586,6 +615,9 @@ class Decompiler:
                     continue
                 for x in prev:
                     union(d_new, x)
+        for n, r, prev in assigns:
+            for x in prev:
+                union(node_defs[(n.id, r)], x)
         # by-ref captures: later redefinitions of the register belong to the same variable
         for n in nodes:
             if n.kind in ('NEWCLOSURE', 'DUPCLOSURE'):

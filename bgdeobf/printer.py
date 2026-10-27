@@ -352,20 +352,40 @@ class Printer:
         return None
 
     # ---------------------------------------------------------------- statements
+    @staticmethod
+    def spacing_kind(s, lines, top):
+        """'small' (one line), 'guard' (a short `if ... then return end` inside a block) or 'big' (anything else that spans
+        several lines).  A blank line goes around every big statement and between two guards; small ones stay together."""
+        n = sum(ln.count('\n') + 1 for ln in lines)
+        if n == 1:
+            return 'small'
+        if not top and s[0] == 'if' and not s[3] and n <= 4 and 1 <= len(s[2]) <= 2 and s[2][-1][0] in ('return', 'break', 'continue'):
+            return 'guard'
+        return 'big'
+
     def block(self, stmts, scope, ind):
         out = []
+        prev = None
         i = 0
         while i < len(stmts):
             s = stmts[i]
+            lines = None
             if s[0] == 'localn':
                 m = self.multi_assign(stmts, i)
                 if m is not None:
                     targets, cnt = m
-                    out.append(ind + ', '.join(self.ex(t, scope, ind) for t in targets) + ' = ' + self.ex(s[2], scope, ind))
-                    i += 1 + cnt
-                    continue
-            out.extend(self.stmt(s, scope, ind, stmts[i + 1:]))
+                    lines = [ind + ', '.join(self.ex(t, scope, ind) for t in targets) + ' = ' + self.ex(s[2], scope, ind)]
+                    i += cnt
+            if lines is None:
+                lines = self.stmt(s, scope, ind, stmts[i + 1:])
             i += 1
+            if not lines:
+                continue
+            kind = self.spacing_kind(s, lines, ind == '')
+            if prev is not None and (kind == 'big' or prev == 'big' or (kind == 'guard' and prev == 'guard')):
+                out.append('')
+            out.extend(lines)
+            prev = kind
         return out
 
     def multi_assign(self, stmts, i):

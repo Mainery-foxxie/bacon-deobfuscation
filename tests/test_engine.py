@@ -9,7 +9,7 @@ import pytest
 from conftest import sample_files
 from bgdeobf import messages
 from bgdeobf.astutil import check_tools
-from bgdeobf.engine import EngineError, Options
+from bgdeobf.engine import EngineError, Options, detect
 from bgdeobf.namesfile import NamesError, parse_names
 from bgdeobf.runner import run
 from bgdeobf.sandbox import SandboxError, run_luau
@@ -245,3 +245,49 @@ def test_annotated_output_is_checked_on_a_clean_copy():
     assert 'annotated' not in clean.info
     import re
     assert re.sub(r'<@\d+:(?:p\d+|\d+)>', '', res.text) == clean.text
+
+
+# ------------------------------------------------------------------------------------------------ detect (nothing is run)
+BANNER_LINE = b'-- Bacon Guard v0.42.0 | FORGE Protection | Build 0a89d3458f6c\n'
+
+
+@pytest.mark.parametrize('data,kind,confidence,needle', [
+    (b'', 'unknown', 0.0, 'the file is empty'),
+    (b'\x1bLua\x00\x01\x02\x03' * 50, 'unknown', 0.0, 'binary'),
+    (b'print("hello world")\nlocal x = 1 + 2\n', 'unknown', 0.0, 'loader layout is not recognized'),
+    (b'local x = = 3 end end', 'unknown', 0.0, 'not valid Luau'),
+    (BANNER_LINE + b'print(1)\n', 'bacon_guard', 0.5, 'the banner is there, but the loader layout is not recognized'),
+    (BANNER_LINE + b'local x = = 3 end end', 'bacon_guard', 0.5, 'not valid Luau'),
+])
+def test_detect_tells_what_a_script_is_without_running_it(data, kind, confidence, needle):
+    d = detect(data)
+    assert (d['kind'], d['confidence'], d['supported']) == (kind, confidence, False)
+    assert needle in d['detail']
+    assert '.lua' not in d['detail'] and 'bgdeobf' not in d['detail'] and '/tmp' not in d['detail']     # no host paths
+
+
+def test_detect_reads_the_build_from_the_banner_and_refuses_a_file_that_is_too_big():
+    d = detect(BANNER_LINE + b'print(1)\n')
+    assert d['banner'] == dict(version='0.42.0', protection='FORGE Protection', build='0a89d3458f6c')
+    assert d['label'] == 'Bacon Guard v0.42.0 (FORGE Protection), build 0a89d3458f6c'
+    big = detect(b'a' * 2000, max_bytes=1000)
+    assert (big['kind'], big['supported']) == ('unknown', False) and 'larger than 1000 bytes' in big['detail']
+
+
+@needs_sample
+@pytest.mark.parametrize('path', SAMPLES, ids=[os.path.basename(p) for p in SAMPLES])
+def test_detect_recognizes_every_sample(path):
+    data = open(path, 'rb').read()
+    d = detect(data)
+    assert (d['kind'], d['supported'], d['confidence']) == ('bacon_guard', True, 1.0), d
+    if d['banner']:
+        assert d['banner']['build'] in d['label']
+    else:
+        assert d['label'] == 'Bacon Guard-style VM (no banner)'
+
+
+@needs_sample
+def test_detect_does_not_accept_a_truncated_script():
+    data = open(smallest(), 'rb').read()
+    d = detect(data[:len(data) // 2])
+    assert d['supported'] is False and d['confidence'] < 1.0 and 'not valid Luau' in d['detail']

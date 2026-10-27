@@ -4,6 +4,9 @@ from .decomp import *
 
 EXIT = -1
 ARITH_OPS = {'ADDK': '+', 'SUBK': '-', 'MULK': '*', 'DIVK': '/', 'MODK': '%', 'POWK': '^', 'IDIVK': '//', 'SUBRK': '-', 'DIVRK': '/'}
+# instructions that read operand registers and write their result to register A
+RESULT_FIRST = {'GETTABLEKS', 'GETTABLE', 'GETTABLEN', 'LENGTH', 'NOT', 'MINUS', 'OR', 'AND', 'ORK', 'ANDK'} \
+    | set(ARITH_RR) | set(ARITH_K) | set(ARITH_RK)
 
 # Every global the Real executor defines, copied from its reference (https://docs.projectreal.gg/en, 24 categories,
 # 232 function pages): the functions, their aliases and the library tables (`crypt`, `json`, `Drawing`, ...).  Methods
@@ -228,7 +231,22 @@ class Gen:
                     # from somewhere else is a local variable
                     w.keep = True
                     return False
+                if below_result(w):
+                    return False
             return ok
+
+        def below_result(w):
+            # The compiler gives the result of `a.b` or `x + 1` its register before it allocates the registers of the
+            # operands it has to compute, so an operand that sits below the result register was not computed for this
+            # instruction: it is a local variable of the source (`local x = f()` ... `x.b`).  Such a value is kept as a
+            # local, whether it has one definition or several (`a and b or c`, whose tests do not count as uses).
+            real = [u_ for u_ in w.uses if nodes[u_[0]].kind not in ('JUMPIF', 'JUMPIFNOT')]
+            if len(real) == 1:
+                u = nodes[real[0][0]]
+                if u.kind in RESULT_FIRST and real[0][1] < u.a['A']:
+                    w.keep = True
+                    return True
+            return False
 
         def mark_materialized(w):
             # a value that was copied/materialised into a register and is then only tested or copied on:
@@ -344,6 +362,7 @@ class Gen:
             if inline_ok(w):
                 regs[r] = Pend(expr, w, leaves, kind, link, method)
                 return
+            below_result(w)
             p = Pend(expr, None, leaves)
             if not w.uses:
                 # dead value: constants and plain copies vanish; anything that does work stays (a call, an index read
@@ -1152,7 +1171,9 @@ class Gen:
             return self.strip_tail_return(stmts[:-1])
         if stmts and stmts[-1][0] == 'if':
             _, c, th, el = stmts[-1]
-            th2, el2 = self.strip_tail_return(th), self.strip_tail_return(el)
+            # with an else the compiler turns the jump over it into a copy of the final return, so that return is
+            # not in the source; without an else the branch only has a return of its own when the source wrote one
+            th2, el2 = (self.strip_tail_return(th) if el else th), self.strip_tail_return(el)
             if th2 or el2:
                 if not th2 and el2:
                     c, th2, el2 = negate(c), el2, []

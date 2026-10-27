@@ -601,3 +601,177 @@ def test_a_while_loop_that_ends_with_a_numeric_for_loop():
     assert re.search(r'^while \w+ > 0 do$', text, re.M), text
     assert re.search(r'^\tfor \w+ = 1, 3 do$', text, re.M), text
     assert report['differing'] == [], report['report']
+
+
+@pytest.mark.parametrize('name', ['getgc', 'toclipboard', 'runonactor', 'hookmetamethod', 'rconsoleprint', 'crypt', 'json',
+                                  'info'])
+def test_a_local_never_takes_the_name_of_an_executor_function(name):
+    """The Real executor documents 232 functions (plus aliases and library tables such as `crypt` and `json`).  A local
+    named like one of them hides it for the rest of the scope, so `local getgc = items.getgc` is written `getgc2`."""
+    text, bytecode, report = roundtrip([
+        I('NEWTABLE', A=0),
+        I('GETTABLEKS', A=1, B=0, aux=0),            # local <name> = items.<name>
+        I('SETTABLEKS', A=1, B=0, aux=1),            # items.A = <name>
+        I('SETTABLEKS', A=1, B=0, aux=2),            # items.B = <name>
+        I('RETURN', A=0, B=1),
+    ], [s(name), s('A'), s('B')])
+    assert re.search(r'^local %s2 = \w+\.%s$' % (name, name), text, re.M), text
+    assert not re.search(r'\blocal %s\b' % name, text), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_local_named_after_a_function_the_script_calls_does_not_hide_it():
+    """`local fetch = fetch("a")` would turn the next `fetch(...)` into a call of a string.  Every function the script
+    imports is kept free for the whole script, even when it is not on the list of known globals."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('LOADK', A=1, rf=1),
+        I('CALL', A=0, B=2, C=2),                    # local x = fetch("a")     (the name hint of x is `fetch`)
+        I('GETIMPORT', A=1, aux=import_aux(0)),
+        I('MOVE', A=2, B=0),
+        I('CALL', A=1, B=2, C=1),                    # fetch(x)
+        I('GETIMPORT', A=1, aux=import_aux(0)),
+        I('MOVE', A=2, B=0),
+        I('CALL', A=1, B=2, C=1),                    # fetch(x)
+        I('RETURN', A=0, B=1),
+    ], [s('fetch'), s('a')])
+    assert re.search(r'^local fetch2 = fetch\("a"\)$', text, re.M), text
+    assert len(re.findall(r'^fetch\(fetch2\)$', text, re.M)) == 2, text
+    assert report['differing'] == [], report['report']
+
+
+# ------------------------------------------------------------------------------------------------ same instructions in the same order
+def test_a_value_read_once_below_the_register_of_its_result_stays_a_local():
+    """`local pi = math.pi` ... `print("x")` ... `local m = pi * 2`: the compiler gives the result of `pi * 2` its register
+    before it computes the operands, so an operand that sits below the result was computed earlier, for a variable.
+    Writing `return math.pi * 2` would move the import behind the call (the bytecode check calls that "reordered")."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0, 1)),   # local n = math.pi
+        I('GETIMPORT', A=1, aux=import_aux(2)),
+        I('LOADK', A=2, rf=3),
+        I('CALL', A=1, B=2, C=1),                    # print("x")
+        I('MULK', A=1, B=0, C=4),                    # local m = n * 2
+        I('RETURN', A=1, B=2),                       # return m
+    ], [s('math'), s('pi'), s('print'), s('x'), num(2)])
+    assert re.search(r'^local (\w+) = math\.pi\nprint\("x"\)\nreturn \1 \* 2$', text, re.M), text
+    assert report['identical'] == report['functions_orig'], report['report']
+    direct, _, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(2)),
+        I('LOADK', A=1, rf=3),
+        I('CALL', A=0, B=2, C=1),                    # print("x")
+        I('GETIMPORT', A=0, aux=import_aux(0, 1)),   # the import is computed for the multiplication itself
+        I('MULK', A=0, B=0, C=4),
+        I('RETURN', A=0, B=2),                       # return math.pi * 2
+    ], [s('math'), s('pi'), s('print'), s('x'), num(2)])
+    assert direct.endswith('print("x")\nreturn math.pi * 2\n'), direct
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+def test_a_value_made_by_and_or_that_is_read_once_below_the_register_of_its_result_stays_a_local():
+    """`local v = a and b or c` then `print(v + g())`: the value has several definitions and the test of the middle one is
+    one more read of the same variable, but the only real read is the addition, whose result register is above it.  Written
+    as `print((a and b or c) + g())` the three global loads and the tests would move behind the load of `print`."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=1, aux=import_aux(0)),      # a
+        I('JUMPIFNOT', to=4, A=1),
+        I('GETIMPORT', A=0, aux=import_aux(1)),      # b
+        I('JUMPIF', to=5, A=0),                      # local v = a and b or c
+        I('GETIMPORT', A=0, aux=import_aux(2)),      # c
+        I('GETIMPORT', A=1, aux=import_aux(3)),      # print(
+        I('GETIMPORT', A=3, aux=import_aux(4)),
+        I('CALL', A=3, B=1, C=2),                    #   g()
+        I('ADD', A=2, B=0, C=3),                     #   v + g()
+        I('CALL', A=1, B=2, C=1),                    # )
+        I('RETURN', A=0, B=1),
+    ], [s('a'), s('b'), s('c'), s('print'), s('g')])
+    assert re.search(r'^local (\w+) = a and b or c\nprint\(\1 \+ g\(\)\)$', text, re.M), text
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+def test_a_variable_that_a_loop_assigns_and_returns_keeps_its_assignment():
+    """`local flag = false`, then inside a loop `flag = true return flag`: the temporaries of a `for` loop sit above the
+    loop's own registers, so a write to a lower register is an assignment to a variable declared before the loop.  Printed
+    as `return true` the compiler would see a variable that is never assigned and turn the `return flag` after the loop
+    into `return false`."""
+    text, bytecode, report = roundtrip([
+        I('LOADB', A=0, B=0),                        # local flag = false
+        I('LOADN', A=3, rf=1),
+        I('LOADN', A=1, rf=3),
+        I('LOADN', A=2, rf=1),
+        I('FORNPREP', to=12, A=1),                   # for i = 1, 3 do
+        I('GETIMPORT', A=4, aux=import_aux(0)),
+        I('MOVE', A=5, B=3),
+        I('CALL', A=4, B=2, C=2),                    #   local r = f(i)
+        I('JUMPIFNOT', to=11, A=4),                  #   if r then
+        I('LOADB', A=0, B=1),                        #     flag = true
+        I('RETURN', A=0, B=2),                       #     return flag
+        I('FORNLOOP', to=5, A=1),                    # end
+        I('RETURN', A=0, B=2),                       # return flag
+    ], [s('f')])
+    assert re.search(r'^local (\w+) = false\n.*\n\t\t\1 = true\n\t\treturn \1\n\tend\nend\n\nreturn \1$', text, re.M | re.S), text
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+def test_a_return_that_ends_an_if_branch_is_kept_when_the_bytecode_has_one_there():
+    """`if not x then error("e") return end` is two RETURN instructions (the branch and the end of the function) and
+    `if not x then error("e") end` is one.  The bytecode check counts them, so the branch keeps its `return` only when the
+    program had one; the last return of the function itself is implicit and is never printed."""
+    with_return, _, report = roundtrip([
+        I('GETVARARGS', A=0, B=2),                   # local x = ...
+        I('JUMPIF', to=6, A=0),                      # if not x then
+        I('GETIMPORT', A=1, aux=import_aux(0)),
+        I('LOADK', A=2, rf=1),
+        I('CALL', A=1, B=2, C=1),                    #   error("e")
+        I('RETURN', A=0, B=1),                       #   return
+        I('RETURN', A=0, B=1),                       # end
+    ], [s('error'), s('e')])
+    assert re.search(r'^\treturn$', with_return, re.M) and with_return.endswith('\nend\n'), with_return
+    assert report['identical'] == report['functions_orig'], report['report']
+    without, _, report = roundtrip([
+        I('GETVARARGS', A=0, B=2),                   # local x = ...
+        I('JUMPIF', to=5, A=0),                      # if not x then
+        I('GETIMPORT', A=1, aux=import_aux(0)),
+        I('LOADK', A=2, rf=1),
+        I('CALL', A=1, B=2, C=1),                    #   error("e")
+        I('RETURN', A=0, B=1),                       # end
+    ], [s('error'), s('e')])
+    assert 'return' not in without, without
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+# ------------------------------------------------------------------------------------------------ blank lines
+def test_a_blank_line_goes_around_every_block_and_small_statements_stay_together():
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)), I('LOADK', A=1, rf=1), I('CALL', A=0, B=2, C=1),      # print("a")
+        I('GETIMPORT', A=0, aux=import_aux(0)), I('LOADK', A=1, rf=2), I('CALL', A=0, B=2, C=1),      # print("b")
+        I('LOADN', A=2, rf=1), I('LOADN', A=0, rf=3), I('LOADN', A=1, rf=1),
+        I('FORNPREP', to=14, A=0),                                                                    # for i = 1, 3 do
+        I('GETIMPORT', A=3, aux=import_aux(0)), I('MOVE', A=4, B=2), I('CALL', A=3, B=2, C=1),         #   print(i)
+        I('FORNLOOP', to=10, A=0),                                                                    # end
+        I('GETIMPORT', A=0, aux=import_aux(0)), I('LOADK', A=1, rf=3), I('CALL', A=0, B=2, C=1),      # print("c")
+        I('GETIMPORT', A=0, aux=import_aux(0)), I('LOADK', A=1, rf=4), I('CALL', A=0, B=2, C=1),      # print("d")
+        I('RETURN', A=0, B=1),
+    ], [s('print'), s('a'), s('b'), s('c'), s('d')])
+    assert text == 'print("a")\nprint("b")\n\nfor i = 1, 3 do\n\tprint(i)\nend\n\nprint("c")\nprint("d")\n', text
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+def test_two_guard_clauses_in_a_row_are_apart_but_a_guard_next_to_a_small_statement_is_not():
+    """`if not p1 then return end` is a guard: short, ends in `return`, inside a function.  Two of them in a row would run
+    together into a wall, so they get a blank line; the plain statement after the last one stays close to it."""
+    text, bytecode, report = roundtrip_protos({
+        0: dict(code=[I('DUPCLOSURE', A=0, rf=0), I('RETURN', A=0, B=2)], consts={0: num(1)}),
+        1: dict(code=[
+            I('JUMPIF', to=2, A=0),
+            I('RETURN', A=0, B=1),                   # if not p1 then return end
+            I('JUMPIF', to=4, A=1),
+            I('RETURN', A=0, B=1),                   # if not p2 then return end
+            I('GETIMPORT', A=2, aux=import_aux(0)),
+            I('LOADK', A=3, rf=1),
+            I('CALL', A=2, B=2, C=1),                # print("x")
+            I('RETURN', A=0, B=1),
+        ], consts={0: s('print'), 1: s('x')}, np=2),
+    })
+    assert text == ('return function(p1, p2)\n\tif not p1 then\n\t\treturn\n\tend\n\n\tif not p2 then\n\t\treturn\n\tend\n'
+                    '\tprint("x")\nend\n'), text
+    assert report['identical'] == report['functions_orig'], report['report']

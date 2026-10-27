@@ -23,8 +23,24 @@ python -m bgdeobf --check                # check the Luau tools
 python -m bgdeobf script.lua             # -> script_deobf.lua
 python -m bgdeobf script.lua -o result.lua --annotate     # write every variable's key (-> a names file)
 python -m bgdeobf script.lua --names names.json           # use your own names: {"12:34": "playerList"}
+python -m bgdeobf --detect script.lua    # only say if it is Bacon Guard / FORGE and which build (nothing is run)
+python -m bgdeobf scripts/ -o results/ --jobs 4           # a whole folder (or several files) at once
 ```
-Exit codes: 0 success, 1 misuse, 2 failure (the reason is printed clearly).
+Exit codes: 0 success, 1 misuse, 2 failure (the reason is printed clearly). With several files, 2 means at least one
+failed; the others are still written.
+
+### Several files, a folder and `--detect`
+- **A folder** means the `.lua`, `.luau` and `.txt` files directly inside it (not its sub-folders). Results of an earlier
+  run (`*_deobf.lua`, `*_annotated.lua`) found in a folder are skipped, so running the same folder twice is safe.
+  Results go next to each input, or into the folder given with `-o` (created if needed; two inputs with the same name
+  become `x_deobf.lua` and `x_2_deobf.lua`). With one file, `-o` is still the output file (or a folder, if it is one).
+- **`--jobs N`** processes N files at the same time, each in its own limited worker process. One broken file never
+  stops the others. `--json` prints one entry per file.
+- **`--detect`** parses only the loader (nothing is run, not even in the sandbox) and prints one line per file:
+  `name`, `bacon_guard` or `unknown`, a confidence and the build. `1.00` means the loader layout is recognized, `0.50`
+  means the banner is there but the layout is not (damaged, truncated, or a newer build), `0.00` means it is not a
+  Bacon Guard / FORGE script. A `1.00` does not promise a full result: the handlers of the build are only checked
+  when the script is really deobfuscated. The exit code is 2 if any file is not recognized.
 
 ### Naming variables (`annotate` + names file)
 `--annotate` (the `annotate` option of `/deobf`) writes a key after every variable, for example
@@ -96,11 +112,13 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
 ## What has and hasn't been tested
 - Tested on 10 real builds (Bacon Guard v0.42.0 "The Morgue Shift", ClarksCicaverse, TommyPlay, FORGE Protection build
   03d3bec6a6b0, a build with no banner that keeps the program in compressed pages, and Bacon Guard v0.43.0 | FORGE
-  Protection builds baf6ea30ebd0, cf776ebed029, a7c98b93da5b, af206410f1dd and cb5687cb3df4). Bytecode check: 168/168,
-  23/24, 172/172, 93/93, 172/172, 69/70, 62/62, 77/77, 56/58 and 83/85 functions identical. The 24th Cic function
-  differs by an extra `return` after `error()` (same behavior); in three of the v0.43.0 scripts one or two functions
-  have the same instructions with a plain read, arithmetic step or constant load in a different place (no call, write
-  or jump moved).
+  Protection builds baf6ea30ebd0, cf776ebed029, a7c98b93da5b, af206410f1dd and cb5687cb3df4). Bytecode check, in that
+  order: 168/168, 24/24, 172/172, 93/93, 172/172, 70/70, 62/62, 77/77, 58/58 and 85/85 functions identical, meaning the
+  result compiles back to the same instructions in the same order (registers are not compared, since they can differ
+  for the same source). On another build the check can still report a function as "reordered" (same instructions, a
+  plain read or calculation in a different place) or "cosmetic" (one `return` more or less); the summary says so.
+  `--detect` and a whole-folder run with `--jobs 3` were also tried on those 10 scripts: all 10 were recognized and all
+  10 results came out identical.
   Other builds may use patterns that are not covered yet; read the error message. The protector changes small details
   between builds (for example how the loader ends), so a new build can fail with a clear error message until that
   detail is added.
@@ -116,10 +134,15 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
 - Tables follow the bytecode: a constructor the compiler turned into a template (`{a = 1, b = f()}`) is printed as one,
   and a table it built field by field is printed as `local t = {}` plus assignments. That is the same program but can
   look less tidy than the original source (for example two tables that were arguments of one call become two locals).
-- About 240 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
+  The same goes for a value that the compiler computed into a variable before it was used (`local size = p.Size` and
+  then `size.Y * 0.5`): it is kept as a local, because writing it into the expression would move its read.
+- The result has a blank line around every block (function, `if`, loop) and between two short
+  `if ... then return end` guards, so long scripts read more easily. It changes nothing in the program.
+- About 280 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
   `tests/samples/` is empty): sandbox limits, damaged/truncated files, hard timeout, queue, the URL downloader (local
-  server + fake resolver), the decompiler and the decoder on small hand-assembled programs (these need no protected
-  script), and the whole bot flow (slash, menu, `!uwu`) using the **real discord.py library with a fake Discord network**.
+  server + fake resolver), the command line (single file, folders, `--jobs`, `--detect`), the decompiler and the decoder
+  on small hand-assembled programs (these need no protected script), and the whole bot flow (slash, menu, `!uwu`)
+  using the **real discord.py library with a fake Discord network**.
   A live connection to Discord could **not** be tested where this was built (no token). To check on
   your machine: set `GUILD_ID`, start the bot, send one file with `/deobf` and one with `!uwu`. Downloading from the real
   internet (e.g. raw.githubusercontent.com) could not be tried there either; the TLS path uses aiohttp's defaults.
