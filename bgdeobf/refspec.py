@@ -227,6 +227,11 @@ def _gtn(st):
     setR(st, F(st, 'A'), _idx(R(st, F(st, 'B')), F(st, 'C') + 1))
 
 
+@spec('SETTABLEN')
+def _stn(st):
+    _setidx(R(st, F(st, 'B')), F(st, 'C') + 1, R(st, F(st, 'A')))
+
+
 @spec('SELF')
 def _self(st):
     o = R(st, F(st, 'B'))
