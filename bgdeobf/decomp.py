@@ -333,7 +333,7 @@ class Decompiler:
                 n.reads, n.writes = [a['B']], [a['A']]
             elif k == 'GETTABLEKS':
                 n.reads, n.writes = [a['B']], [a['A']]
-            elif k == 'SETTABLEKS':
+            elif k in ('SETTABLEKS', 'SETTABLEN'):
                 n.reads = [a['A'], a['B']]
             elif k == 'SELF':
                 n.reads, n.writes = [a['B']], [a['A'] + 1, a['A']]
