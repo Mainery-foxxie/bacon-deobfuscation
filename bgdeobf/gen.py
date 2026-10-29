@@ -222,7 +222,7 @@ class Gen:
                   and not (nodes[w.uses[0][0]].kind == 'MOVE' and nodes[w.uses[0][0]].a['A'] > nodes[w.uses[0][0]].a['B']))
             if ok:
                 u = nodes[w.uses[0][0]]
-                if u.kind in ('SETTABLEKS', 'SETTABLE') and w.uses[0][1] == u.a['A'] and u.a['A'] < u.a['B']:
+                if u.kind in ('SETTABLEKS', 'SETTABLE', 'SETTABLEN') and w.uses[0][1] == u.a['A'] and u.a['A'] < u.a['B']:
                     # the stored value sits below the table register: it is a local declared earlier, not a temporary
                     w.keep = True
                     return False
@@ -510,6 +510,11 @@ class Gen:
                 v = rd(n, a['A'])
                 settle([o, v], True, isinstance(o.expr, Var) and getattr(o.expr.web, 'ctor', False))
                 stmts.append(('assign', Idx(o.expr, self.kbytes(fn, a['aux'])), v.expr))
+            elif k == 'SETTABLEN':
+                o = rd(n, a['B'])
+                v = rd(n, a['A'])
+                settle([o, v], True, isinstance(o.expr, Var) and getattr(o.expr.web, 'ctor', False))
+                stmts.append(('assign', Idx(o.expr, Const('n', a['C'] + 1)), v.expr))
             elif k == 'SELF':
                 o = rd(n, a['B'])
                 key = self.kbytes(fn, a['aux'])
@@ -1193,4 +1198,3 @@ class Gen:
         body = post_passes(body, fn)
         fn.body = body
         return fn
-
