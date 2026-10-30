@@ -1,13 +1,12 @@
 """The live progress card the Discord bot shows while a job runs.
 
-    ⠹ Deobfuscating script
+    ⠹ Fetching script
     Working on your sample.
 
     ✅ Validating URL
     ✅ Downloading content
-    **⠹ Detecting obfuscator**
-    ▫️ Opening the VM
-    ...
+    **⠹ Detecting obfuscator** · opening the VM
+    ▫ Preparing download
     4.2s elapsed
 
 `Card` only holds state and produces plain data (`data()`), so it is easy to test; `embed()` turns that into a
@@ -15,30 +14,30 @@ discord.Embed.  The bot redraws it about once a second (see Handler._pump), whic
 import time
 
 SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-RUNNING, DONE, FAILED = 0x5865F2, 0x57F287, 0xED4245
-MARK = {'todo': '▫️', 'done': '✅', 'failed': '❌'}
+RUNNING, DONE, FAILED = 0x4E5058, 0x57F287, 0xED4245
+MARK = {'todo': '▫', 'done': '✅', 'failed': '❌'}
 
 FILE_STEPS = [
     ('detect', 'Detecting obfuscator'),
-    ('unpack', 'Opening the VM'),
-    ('classify', 'Recognizing handlers'),
-    ('decompile', 'Rebuilding the code'),
-    ('verify', 'Verifying the result'),
     ('deliver', 'Preparing download'),
 ]
 URL_STEPS = [('validate', 'Validating URL'), ('download', 'Downloading content')] + FILE_STEPS
 
-# engine stage names (see engine.deobfuscate) -> card steps
-ENGINE_STAGE = {'analyse': 'detect', 'unpack': 'unpack', 'classify': 'classify', 'decompile': 'decompile',
-                'verify': 'verify'}
+# The engine's own stages all happen inside the "Detecting obfuscator" step (it is the long one); the stage is shown
+# as a short note next to it so a 25 s job does not look stuck.
+ENGINE_STAGE = {'analyse': 'reading the loader', 'unpack': 'opening the VM', 'classify': 'recognizing handlers',
+                'decompile': 'rebuilding the code', 'verify': 'verifying the result'}
 
 
 class Card(object):
-    def __init__(self, from_url=False, title='Deobfuscating script', clock=time.monotonic):
+    def __init__(self, from_url=False, title=None, spinner=None, clock=time.monotonic):
+        """spinner: optional animated custom emoji such as '<a:spin:123456789012345678>'; the braille frames otherwise"""
         self.steps = list(URL_STEPS if from_url else FILE_STEPS)
         self.state = dict((k, 'todo') for k, _ in self.steps)
-        self.title = title
+        self.title = title or ('Fetching script' if from_url else 'Processing script')
+        self.emoji = spinner or None
         self.note = None
+        self.detail = None
         self.status = 'running'      # 'running' | 'done' | 'failed'
         self.frame = 0
         self._clock = clock
@@ -58,12 +57,15 @@ class Card(object):
             else:
                 self.state[k] = 'todo' if seen else 'done'
         self.note = None
+        self.detail = None
 
     def stage(self, name):
-        """an engine stage name ('analyse', 'unpack', ...)"""
-        key = ENGINE_STAGE.get(name)
-        if key is not None:
-            self.begin(key)
+        """an engine stage name ('analyse', 'unpack', ...): the detection step is running, with this detail beside it"""
+        detail = ENGINE_STAGE.get(name)
+        if detail is not None:
+            self.begin('detect')
+            if self.status == 'running':
+                self.detail = detail
 
     def queued(self, position):
         if self.status == 'running':
@@ -97,24 +99,24 @@ class Card(object):
         return (self._t1 if self._t1 is not None else self._clock()) - self._t0
 
     def spinner(self):
-        return SPINNER[self.frame % len(SPINNER)]
+        return self.emoji or SPINNER[self.frame % len(SPINNER)]
 
     def lines(self):
         out = []
         for k, label in self.steps:
             st = self.state[k]
             if st == 'active':
-                out.append('**%s %s**' % (self.spinner(), label))
+                out.append('**%s %s**%s' % (self.spinner(), label, ' · ' + self.detail if self.detail else ''))
             else:
                 out.append('%s %s' % (MARK[st], label))
         return out
 
     def data(self):
         if self.status == 'done':
-            title, color, intro = '✅ Script deobfuscated', DONE, 'All steps finished.'
+            title, color, intro = '✅ Script ready', DONE, 'All steps finished.'
             footer = 'Finished in %.1fs' % self.elapsed()
         elif self.status == 'failed':
-            title, color, intro = '❌ Could not deobfuscate', FAILED, 'The job stopped. The reason is in the message.'
+            title, color, intro = '❌ Failed', FAILED, 'The job stopped. The reason is in the message.'
             footer = 'Stopped after %.1fs' % self.elapsed()
         else:
             title, color, intro = '%s %s' % (self.spinner(), self.title), RUNNING, 'Working on your sample.'
