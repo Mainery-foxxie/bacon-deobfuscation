@@ -94,6 +94,7 @@ class Config(object):
             self.prefix = (e.get('PREFIX') or '!').strip() or '!'
             self.prefix_commands = _flag(e.get('PREFIX_COMMANDS'), True)
             self.progress_card = _flag(e.get('PROGRESS_CARD'), True)
+            self.spinner_emoji = (e.get('SPINNER_EMOJI') or '').strip() or None
             self.url_hosts = set(h.strip().strip('.').lower() for h in re.split(r'[,\s]+', e.get('URL_HOSTS') or '') if h.strip())
             self.url_timeout = 25
             self.max_wait = 13 * 60.0
@@ -103,6 +104,8 @@ class Config(object):
             raise ValueError('MAX_MB (0-8), WORKERS (1-16), MAX_QUEUE (0-100), JOB_TIMEOUT (30-900) out of range')
         if not (1 <= len(self.prefix) <= 3) or any(c.isspace() for c in self.prefix):
             raise ValueError('PREFIX must be 1-3 characters with no spaces')
+        if self.spinner_emoji and not re.fullmatch(r'<a?:\w{2,32}:\d{15,25}>', self.spinner_emoji):
+            raise ValueError('SPINNER_EMOJI must look like <a:name:123456789012345678>')
         for h in self.url_hosts:
             if not re.fullmatch(r'[a-z0-9.-]{1,253}', h):
                 raise ValueError('URL_HOSTS contains an invalid host name: %r' % h)
@@ -378,7 +381,7 @@ class Handler(object):
             await r.accept()
             if self.cfg.progress_card:
                 # the card is drawn by one background task only, so edits never overlap; the steps below just change its state
-                card = Card(from_url=file is None)
+                card = Card(from_url=file is None, spinner=self.cfg.spinner_emoji)
                 card.begin('detect' if file is not None else 'download')
                 pump = asyncio.ensure_future(self._pump(r, card))
 
