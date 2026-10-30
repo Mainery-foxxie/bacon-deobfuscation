@@ -22,7 +22,8 @@ def ok_run(data, opts, hard_timeout=240, progress=None, cancel=None):
 
 
 def make(run=ok_run, workers=1, max_queue=2, **env):
-    e = dict(DISCORD_TOKEN='x', COOLDOWN='0')
+    # these tests check the plain-text status; the progress card has its own tests (test_card.py)
+    e = dict(DISCORD_TOKEN='x', COOLDOWN='0', PROGRESS_CARD='0')
     e.update(env)
     cfg = B.Config(e)
     svc = Service(workers=workers, max_queue=max_queue, run=run)
