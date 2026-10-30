@@ -22,6 +22,7 @@ except ImportError:
     raise ImportError('discord.py is not installed. Run:  pip install -r requirements.txt')
 
 from .astutil import check_tools
+from .card import Card
 from .engine import EngineError, Options
 from .fetch import FetchError, check_url, extract_url, fetch, normalize_url, url_stem
 from .messages import explain, explain_fetch, verdict
@@ -34,6 +35,7 @@ SCRIPT_EXT = ('.lua', '.luau', '.txt')
 NAMES_EXT = ('.json', '.txt')
 NAMES_MAX_BYTES = 256 * 1024
 DM_UPLOAD_LIMIT = 10 * 1024 * 1024
+CARD_INTERVAL = 1.2     # seconds between redraws of the progress card (moves the spinner and the timer)
 COMMAND = 'uwu'
 NOTE = 'Variable names are automatic guesses. Only analyze scripts you own or are allowed to analyze.'
 
@@ -91,6 +93,7 @@ class Config(object):
             self.cooldown = float(e.get('COOLDOWN') or 15)
             self.prefix = (e.get('PREFIX') or '!').strip() or '!'
             self.prefix_commands = _flag(e.get('PREFIX_COMMANDS'), True)
+            self.progress_card = _flag(e.get('PROGRESS_CARD'), True)
             self.url_hosts = set(h.strip().strip('.').lower() for h in re.split(r'[,\s]+', e.get('URL_HOSTS') or '') if h.strip())
             self.url_timeout = 25
             self.max_wait = 13 * 60.0
@@ -164,8 +167,12 @@ class Responder(object):
     async def status(self, text):
         raise NotImplementedError
 
-    async def finish(self, text, attachment=None):
-        """attachment: (filename, bytes) or None"""
+    async def show(self, card):
+        """draw (or redraw) the live progress card"""
+        raise NotImplementedError
+
+    async def finish(self, text, attachment=None, card=None):
+        """attachment: (filename, bytes) or None; card: the finished progress card to leave on screen, or None to clear it"""
         raise NotImplementedError
 
 
@@ -191,11 +198,17 @@ class InteractionResponder(Responder):
         except discord.HTTPException:
             pass
 
-    async def finish(self, text, attachment=None):
+    async def show(self, card):
+        try:
+            await self.i.edit_original_response(content=None, embeds=[card.embed()])
+        except discord.HTTPException:
+            pass
+
+    async def finish(self, text, attachment=None, card=None):
         text = text[:1900]
         f = discord.File(io.BytesIO(attachment[1]), filename=attachment[0]) if attachment else None
         if self.i.response.is_done():
-            kw = {'content': text}
+            kw = {'content': text, 'embeds': [card.embed()] if card is not None else []}
             if f is not None:
                 kw['attachments'] = [f]
             await self.i.edit_original_response(**kw)
@@ -215,16 +228,19 @@ class MessageResponder(Responder):
         self.upload_limit = getattr(guild, 'filesize_limit', None) or DM_UPLOAD_LIMIT
         self.status_msg = None
 
-    async def _send(self, text, attachment=None):
+    async def _send(self, text, attachment=None, card=None):
         kw = {'mention_author': False, 'allowed_mentions': discord.AllowedMentions.none()}
+        text = text[:1900] if text else None
         for with_reference in (True, False):
             if attachment:
                 kw['file'] = discord.File(io.BytesIO(attachment[1]), filename=attachment[0])
+            if card is not None:
+                kw['embed'] = card.embed()
             try:
                 if with_reference:
-                    return await self.m.reply(text[:1900], **kw)
+                    return await self.m.reply(text, **kw)
                 kw.pop('mention_author', None)
-                return await self.m.channel.send(text[:1900], **kw)
+                return await self.m.channel.send(text, **kw)
             except discord.Forbidden:
                 raise
             except discord.HTTPException:
@@ -243,10 +259,19 @@ class MessageResponder(Responder):
         except discord.HTTPException:
             pass
 
-    async def finish(self, text, attachment=None):
+    async def show(self, card):
+        try:
+            if self.status_msg is None:
+                self.status_msg = await self._send(None, card=card)
+            else:
+                await self.status_msg.edit(content=None, embeds=[card.embed()])
+        except discord.HTTPException:
+            pass
+
+    async def finish(self, text, attachment=None, card=None):
         if self.status_msg is not None:
             try:
-                kw = {'content': text[:1900]}
+                kw = {'content': text[:1900], 'embeds': [card.embed()] if card is not None else []}
                 if attachment:
                     kw['attachments'] = [discord.File(io.BytesIO(attachment[1]), filename=attachment[0])]
                 await self.status_msg.edit(**kw)
@@ -254,7 +279,7 @@ class MessageResponder(Responder):
             except discord.HTTPException:
                 pass
         try:
-            await self._send(text, attachment)
+            await self._send(text, attachment, card)
         except discord.Forbidden:
             if attachment:
                 await self._send("I don't have the **Attach Files** permission in this channel, so I can't send the result.")
@@ -348,37 +373,61 @@ class Handler(object):
         t0 = time.monotonic()
         outcome = 'ok'
         source = 'file' if file is not None else 'url'
+        card = pump = None
         try:
             await r.accept()
+            if self.cfg.progress_card:
+                # the card is drawn by one background task only, so edits never overlap; the steps below just change its state
+                card = Card(from_url=file is None)
+                card.begin('detect' if file is not None else 'download')
+                pump = asyncio.ensure_future(self._pump(r, card))
+
+            async def end(text, attachment=None, ok=False):
+                """stop the card, mark it done/failed, and put the final message on screen"""
+                if pump is not None:
+                    await self._stop_pump(pump)
+                if card is not None:
+                    card.complete() if ok else card.fail()
+                return await r.finish(text, attachment, card=card)
+
             try:
                 if file is not None:
                     data = await file.read()
                     stem = safe_stem(file.filename)
                 else:
-                    await r.status('⬇️ Downloading from the URL…')
+                    if card is None:
+                        await r.status('⬇️ Downloading from the URL…')
                     if self._fetching is None:
                         self._fetching = asyncio.Semaphore(4)
                     async with self._fetching:
                         data = await fetch(url, self.cfg.max_bytes, hosts=self.cfg.url_hosts or None,
                                            timeout=self.cfg.url_timeout)
                     stem = safe_stem(url_stem(url))
+                    if card is not None:
+                        card.begin('detect')
                 names = parse_names(await names_file.read()) if names_file is not None else None
             except FetchError as e:
                 outcome = 'fetch:' + e.code
-                return await r.finish(explain_fetch(e.code, e.message, self.cfg.max_mb))
+                return await end(explain_fetch(e.code, e.message, self.cfg.max_mb))
             except NamesError as e:
                 outcome = 'bad_names'
-                return await r.finish(str(e))
+                return await end(str(e))
             except (discord.HTTPException, OSError):
                 outcome = 'download'
-                return await r.finish('Failed to download the attachment from Discord. Try sending it again.')
+                return await end('Failed to download the attachment from Discord. Try sending it again.')
             if len(data) > self.cfg.max_bytes:
                 outcome = 'too_big'
-                return await r.finish('The file is too large (max %g MB).' % self.cfg.max_mb)
+                return await end('The file is too large (max %g MB).' % self.cfg.max_mb)
             last_edit = [0.0]
 
             async def progress(ev):
                 kind, val = ev
+                if card is not None:
+                    if kind == 'queued':
+                        card.queued(val)
+                    else:
+                        card.stage(val)
+                    return
                 now = time.monotonic()
                 if kind == 'queued':
                     text = '⏳ Queued (position %d)…' % val
@@ -394,19 +443,21 @@ class Handler(object):
                     self.service.submit(uid, data, names=names, annotate=annotate, progress=progress), self.cfg.max_wait)
             except asyncio.TimeoutError:
                 outcome = 'wait_timeout'
-                return await r.finish('The queue took too long and the job was cancelled. Try again later.')
+                return await end('The queue took too long and the job was cancelled. Try again later.')
             except Busy as b:
                 outcome = b.reason
-                return await r.finish('You already have a file being processed. Wait until it finishes.'
-                                      if b.reason == 'user_busy' else 'The queue is full. Try again in a few minutes.')
+                return await end('You already have a file being processed. Wait until it finishes.'
+                                 if b.reason == 'user_busy' else 'The queue is full. Try again in a few minutes.')
             except EngineError as e:
                 outcome = 'error:' + e.code
                 if e.code == 'internal':
                     log.error('internal error: %s', e.message)
                 if e.code == 'too_big':
-                    return await r.finish('The file is too large (max %g MB).' % self.cfg.max_mb)
-                return await r.finish(explain(e.code, e.message))
-            return await self.deliver(r, stem, res, time.monotonic() - t0)
+                    return await end('The file is too large (max %g MB).' % self.cfg.max_mb)
+                return await end(explain(e.code, e.message))
+            if card is not None:
+                card.begin('deliver')
+            return await self.deliver(r, stem, res, time.monotonic() - t0, end=end)
         except discord.HTTPException as e:
             outcome = 'discord_error'
             log.warning('discord error while replying: %s', e)
@@ -414,16 +465,45 @@ class Handler(object):
             outcome = 'crash'
             log.exception('unexpected failure')
             try:
-                await r.finish(explain('internal'))
+                if pump is not None:
+                    await self._stop_pump(pump)
+                if card is not None:
+                    card.fail()
+                await r.finish(explain('internal'), card=card)
             except Exception:
                 pass
         finally:
+            if pump is not None:
+                pump.cancel()
             self._inflight.discard(uid)
             self._stamp(uid)
             log.info('job user=%s guild=%s src=%s size=%s -> %s %.1fs', uid, r.guild_id, source,
                      getattr(file, 'size', '-'), outcome, time.monotonic() - t0)
 
-    async def deliver(self, r, stem, res, seconds):
+    async def _pump(self, r, card):
+        """the only writer of the progress card: draws it, waits a moment, moves the spinner, draws it again"""
+        try:
+            while True:
+                await r.show(card)
+                await asyncio.sleep(CARD_INTERVAL)
+                card.tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('progress card stopped')
+
+    @staticmethod
+    async def _stop_pump(pump):
+        pump.cancel()
+        try:
+            await pump
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def deliver(self, r, stem, res, seconds, end=None):
+        if end is None:
+            async def end(text, attachment=None, ok=False):
+                return await r.finish(text, attachment)
         body = res.text.encode('utf-8')
         out_name = stem + ('_annotated.lua' if res.info.get('annotated') else '_deobf.lua')
         limit = r.upload_limit - 64 * 1024
@@ -436,10 +516,10 @@ class Handler(object):
             out_name += '.zip'
             note = '\nThe result was zipped because it exceeds the server upload limit.'
             if len(body) > limit:
-                return await r.finish('The result is too large to upload on this server (%d lines). '
-                                      'Run it through the CLI on your computer.' % res.info.get('lines', 0))
+                return await end('The result is too large to upload on this server (%d lines). '
+                                 'Run it through the CLI on your computer.' % res.info.get('lines', 0))
         lines = ['✅ Done (%.0f s)' % seconds] + verdict(res.info)
-        await r.finish('\n'.join(lines) + note + '\n-# ' + NOTE, attachment=(out_name, body))
+        await end('\n'.join(lines) + note + '\n-# ' + NOTE, attachment=(out_name, body), ok=True)
 
     # ------------------------------------------------------------ entry points
     async def from_message(self, interaction, message):
