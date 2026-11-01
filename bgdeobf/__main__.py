@@ -14,12 +14,12 @@ from .namesfile import NamesError, parse_names
 from .runner import run
 
 EXTENSIONS = ('.lua', '.luau', '.txt')
-RESULT_SUFFIXES = ('_deobf.lua', '_annotated.lua')
+RESULT_SUFFIXES = ('_deobf.lua', '_annotated.lua', '_reconstructed.lua')
 
 
 def expand_inputs(paths):
     """The files named on the command line plus the scripts directly inside every folder named (sorted, no sub-folders).
-    Results of an earlier run (`*_deobf.lua`, `*_annotated.lua`) found inside a folder are not picked up again.
+    Results of an earlier run (`*_deobf.lua`, `*_annotated.lua`, `*_reconstructed.lua`) found inside a folder are not picked up again.
     Returns (files, problems)."""
     files, problems, seen = [], [], set()
     for p in paths:
@@ -60,11 +60,11 @@ def short_summary(info):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='bgdeobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE.')
+    ap = argparse.ArgumentParser(prog='bgdeobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE (MoonVeil: behaviour reconstruction only).')
     ap.add_argument('input', nargs='*', help='protected .lua / .luau / .txt file(s) or folder(s) (or - for stdin)')
     ap.add_argument('--check', action='store_true', help='check that the Luau tools are installed and can run')
     ap.add_argument('--detect', action='store_true',
-                    help='only say whether each file is a Bacon Guard / FORGE script and which build; nothing is run')
+                    help='only say whether each file is a Bacon Guard / FORGE (or MoonVeil) script and which build; nothing is run')
     ap.add_argument('-o', '--output', help='output file (default: <name>_deobf.lua, or <name>_annotated.lua with --annotate); '
                                            'with several files or a folder: the output folder (default: next to each input)')
     ap.add_argument('--jobs', type=int, default=1, help='several files or a folder: how many are processed at the same time (default 1)')
@@ -137,7 +137,7 @@ def main(argv=None):
         if a.output and not out_dir:
             return a.output
         stem = 'stdin' if inp == '-' else os.path.splitext(os.path.basename(inp))[0]
-        suffix = '_annotated.lua' if info.get('annotated') else '_deobf.lua'
+        suffix = '_reconstructed.lua' if info.get('trace_only') else '_annotated.lua' if info.get('annotated') else '_deobf.lua'
         folder = out_dir or ('.' if inp == '-' else os.path.dirname(os.path.abspath(inp)))
         path, n = os.path.join(folder, stem + suffix), 2
         with lock:
@@ -238,8 +238,8 @@ def main(argv=None):
 
 
 def detect_files(files, a):
-    """--detect: one line per file `name<TAB>kind<TAB>confidence<TAB>label` (kind: bacon_guard | unknown).
-    Exit code 0 when every file is a supported Bacon Guard / FORGE layout, 2 when not."""
+    """--detect: one line per file `name<TAB>kind<TAB>confidence<TAB>label` (kind: bacon_guard | moonveil | unknown).
+    Exit code 0 when every file is a supported Bacon Guard / FORGE layout or a MoonVeil script (behaviour trace only), 2 when not."""
     rows, bad = [], 0
     for inp in files:
         try:

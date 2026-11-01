@@ -27,7 +27,7 @@ ERRORS = {
     'binary': "This file isn't text (it looks like binary / bytecode).",
     'syntax': "This file isn't valid Luau (it may be truncated or copied incorrectly). Send the original file.",
     'setup': 'The Luau tools were not found on this machine (check the luau_bin folder or BGDEOBF_LUAU_DIR).',
-    'unsupported': "This script isn't a Bacon Guard / FORGE build I recognize, or the build uses parts I don't understand yet, so I won't guess.",
+    'unsupported': "This script isn't a Bacon Guard / FORGE or MoonVeil build I recognize, or it uses parts I don't understand yet, so I won't guess.",
     'timeout': 'The job went over the time limit and was stopped.',
     'sandbox': "The loader couldn't be opened in the sandbox (the script is damaged, truncated, or an unsupported version).",
     'decode': 'The VM contents were read, but some instructions could not be translated.',
@@ -51,6 +51,8 @@ def explain(code, detail=None):
 def verdict(info):
     """short English summary of a successful run"""
     out = []
+    if info.get('trace_only'):
+        return _verdict_trace(info)
     b = info.get('banner')
     if b:
         out.append('Detected: Bacon Guard v%s (%s), build %s' % (b['version'], b['protection'], b['build']))
@@ -72,6 +74,24 @@ def verdict(info):
     if info.get('annotated'):
         out.append('Annotated copy: the `<@…>` keys are for building a names file, so this version is not runnable as is'
                    + (' (the checks ran on a clean copy)' if f or info.get('syntax_ok') else ''))
+    for w in info.get('warnings', []):
+        out.append('Note: ' + scrub(w))
+    return out
+
+
+def _verdict_trace(info):
+    """summary of a behaviour trace (MoonVeil): never presented as a decompilation"""
+    v = (info.get('moonveil') or {}).get('version')
+    out = ['Detected: MoonVeil%s (private VM protector)' % (' ' + v if v and v != '?' else '')]
+    out.append("This is a behaviour reconstruction, NOT the original source: MoonVeil can't be reversed to source. "
+               'The script was run in a sandbox with fake Roblox objects and what it did was written down')
+    out.append('%d calls seen in %d threads/callbacks, %d output lines' % (info.get('calls', 0), info.get('threads', 0),
+                                                                          info.get('lines', 0)))
+    if info.get('downloads'):
+        out.append('It downloads and runs %d other script%s (not fetched, so not included): %s'
+                   % (len(info['downloads']), '' if len(info['downloads']) == 1 else 's', ', '.join(info['downloads'][:3])))
+    if info.get('syntax_ok'):
+        out.append('Output syntax is valid')
     for w in info.get('warnings', []):
         out.append('Note: ' + scrub(w))
     return out

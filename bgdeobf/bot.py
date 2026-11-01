@@ -55,6 +55,7 @@ INFO = (
     '• Formats: .lua / .luau / .txt, max {mb:g} MB. GitHub `blob`, Pastebin and Gist links are converted to raw automatically\n'
     '• Takes about 5–60 seconds; the result is re-checked (syntax + bytecode)\n'
     '• Builds that are not recognized are rejected with a clear reason, never guessed\n'
+    '• MoonVeil scripts cannot be turned back into source: you get a `_reconstructed.lua` that lists what the script does, clearly labelled\n'
     '• `annotate` writes a key next to every variable; fill in a JSON file `{{"12:34": "name"}}` and send it via `names`\n'
     '• Slash commands: the result is visible only to you by default (`private`). `{p}uwu` replies in the channel\n'
     '-# Use only on scripts you own or are allowed to analyze.'
@@ -508,7 +509,8 @@ class Handler(object):
             async def end(text, attachment=None, ok=False):
                 return await r.finish(text, attachment)
         body = res.text.encode('utf-8')
-        out_name = stem + ('_annotated.lua' if res.info.get('annotated') else '_deobf.lua')
+        out_name = stem + ('_reconstructed.lua' if res.info.get('trace_only')
+                           else '_annotated.lua' if res.info.get('annotated') else '_deobf.lua')
         limit = r.upload_limit - 64 * 1024
         note = ''
         if len(body) > limit:
@@ -617,7 +619,7 @@ class DeobfClient(discord.Client):
     def _register(self):
         tree, h = self.tree, self.handler
 
-        @tree.command(name='deobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE')
+        @tree.command(name='deobf', description='Deobfuscate Roblox scripts (Bacon Guard / FORGE; MoonVeil: behaviour trace)')
         @app_commands.describe(file='Protected .lua / .luau / .txt file',
                                url='Or the raw URL of the script (https://…)',
                                private='Only you can see the result (default: yes)',

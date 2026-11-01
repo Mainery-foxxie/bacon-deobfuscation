@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import time
 
-from . import fidelity
+from . import fidelity, moonveil
 from .astutil import LuauError, LuauMissing, LuauSyntax, LuauTimeout, find_bin, normalize_source
 from .classify import ClassifyError, Classifier, collect_domains, RAWF
 from .decode import DecodeError, Decoder
@@ -136,6 +136,11 @@ def detect(data, max_bytes=3 * 1024 * 1024):
     if b'\x00' in data[:4096]:
         return answer('unknown', 0.0, 'not a text script', None, 'the file looks like binary / bytecode')
     text = normalize_source(data)
+    mv = moonveil.detect(text)
+    if mv:
+        return answer('moonveil', 1.0, 'MoonVeil %s (behaviour trace only)' % mv['version'], None,
+                      'MoonVeil cannot be turned back into source; a behaviour reconstruction is written instead',
+                      supported=True)
     m = BANNER.search(text[:4000])
     banner = dict(version=m.group(1), protection=m.group(2), build=m.group(3)) if m else None
     name = 'Bacon Guard v%s (%s), build %s' % (banner['version'], banner['protection'], banner['build']) if banner else None
@@ -167,6 +172,25 @@ def detect(data, max_bytes=3 * 1024 * 1024):
     return answer('unknown', 0.0, 'not a Bacon Guard / FORGE script', None, problem)
 
 
+def _moonveil(text, mv, opts, note):
+    """MoonVeil cannot be decompiled; the script is run in the trace sandbox and its behaviour is written down"""
+    note('analyse')
+
+    def check(out):
+        try:
+            ok, msg, _ = compile_check(out)
+        except (LuauError, subprocess.TimeoutExpired, OSError) as e:
+            return None, 'compile check unavailable: %s' % e
+        return ok, msg
+    try:
+        out, info = moonveil.deobfuscate(text, mv, timeout=opts.sandbox_timeout, mem_mb=opts.sandbox_mem_mb, note=note,
+                                         check=check if opts.verify else None)
+    except moonveil.TraceError as e:
+        raise EngineError({'setup': 'setup', 'timeout': 'timeout', 'syntax': 'syntax'}.get(e.code, 'unsupported'),
+                          e.message)
+    return Result(out, info)
+
+
 def deobfuscate(data, opts=None, progress=None):
     opts = opts or Options()
     note = progress or (lambda s: None)
@@ -185,6 +209,9 @@ def deobfuscate(data, opts=None, progress=None):
     if b'\x00' in data[:4096]:
         raise EngineError('binary', 'the file does not look like a text script')
     text = normalize_source(data)
+    mv = moonveil.detect(text)
+    if mv:
+        return _moonveil(text, mv, opts, note)
     m = BANNER.search(text[:4000])
     if m:
         info['banner'] = dict(version=m.group(1), protection=m.group(2), build=m.group(3))
