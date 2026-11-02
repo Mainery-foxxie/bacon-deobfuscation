@@ -1,0 +1,25 @@
+# Copy this file to .env and fill in the token. NEVER share the .env file.
+DISCORD_TOKEN=
+
+# Optional ---------------------------------------------------------------
+# Register the slash commands to one server only (they appear immediately, good for testing)
+# GUILD_ID=
+# Limit who can use the bot (IDs separated by commas). Empty = everyone.
+# ALLOWED_GUILDS=
+# ALLOWED_USERS=
+# Chat commands (!uwu, !moonveil). Need the "Message Content Intent" turned on in the Developer Portal.
+# PREFIX=!
+# PREFIX_COMMANDS=1
+# Limit raw URLs to certain domains (subdomains included). Empty = any public host.
+# URL_HOSTS=raw.githubusercontent.com, pastebin.com, gist.githubusercontent.com
+# Max file size (MB), parallel jobs, queue length, time limit per job (seconds), pause per user (seconds)
+# MAX_MB=3
+# WORKERS=2
+# MAX_QUEUE=8
+# JOB_TIMEOUT=240
+# COOLDOWN=15
+# Live progress card (an embed with the steps and a spinner) while a job runs. 0 = a plain-text status line instead.
+# PROGRESS_CARD=1
+# Animated custom emoji for the card's spinner, like <a:spin:123456789012345678> (the bot has to be able to use it).
+# Empty = a text spinner.
+# SPINNER_EMOJI=
