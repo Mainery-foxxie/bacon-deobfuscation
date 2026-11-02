@@ -238,3 +238,15 @@ def test_detect_reports_a_broken_luau_setup(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(M, 'detect', broken)
     assert M.main(['--detect', str(tmp_path / 'a.lua')]) == 2
     assert 'FAILED: The Luau tools were not found' in capsys.readouterr().err
+
+
+def test_folder_runs_skip_what_an_earlier_run_wrote_next_to_the_scripts(tmp_path):
+    mine = ['a.lua', 'b.luau', 'notes.txt', 'my_trace_tool.lua', 'payload1.lua']
+    written = ['a_deobf.lua', 'b_annotated.lua', 'c_reconstructed.lua', 'a_trace.txt', 'A_TRACE.TXT', 'a_payload1.lua',
+               'a_payload12.txt', 'c_payload3.lua']
+    for n in mine + written:
+        (tmp_path / n).write_bytes(b'x')
+    files, problems = M.expand_inputs([str(tmp_path)])
+    assert sorted(os.path.basename(f) for f in files) == sorted(mine) and not problems
+    named, _ = M.expand_inputs([str(tmp_path / 'a_trace.txt')])          # a file named on purpose is always taken
+    assert [os.path.basename(f) for f in named] == ['a_trace.txt']

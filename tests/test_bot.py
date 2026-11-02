@@ -393,3 +393,182 @@ def test_safe_stem():
     assert B.safe_stem('../../etc/Pass wd.lua') == 'Pass_wd'
     assert B.safe_stem('...') == 'script'
     assert B.safe_stem(None) == 'script'
+
+
+# ------------------------------------------------------------------------------------------ trace / sandbox options
+import io
+import zipfile
+
+from bgdeobf.engine import NAME_MARK, STEM_MARK
+
+SUMMARY = dict(events=40, repeated=3, requests=2, domains=['api.example.com', 'cdn.example.org'], remotes=1, payloads=1,
+               loadstrings=1, errors=0, files_written=0, instances=12, findings=['Downloads code and runs it'], finished=True,
+               reason='the simulated time limit of 30 s was reached', simulated=30.0, real_seconds=1.2, status='ok')
+
+
+def trace_dict(summary=None, report=None, payloads=1):
+    rep = report or ('FAKE ROBLOX SANDBOX TRACE  -  %s\nsaved as %s_payload1.lua\n' % (NAME_MARK, STEM_MARK))
+    pl = [dict(id=i + 1, kind='loadstring', label='x', length=12, data=b'print("p%d")\n' % (i + 1), ext='lua') for i in range(payloads)]
+    return dict(report=rep, payloads=pl, summary=dict(summary or SUMMARY))
+
+
+def trace_run(summary=None, report=None, payloads=1, seen=None):
+    def run(data, opts, hard_timeout=240, progress=None, cancel=None):
+        if seen is not None:
+            seen.append((opts.trace, opts.sandbox_only, opts.annotate))
+        t = trace_dict(summary, report, payloads)
+        if opts.sandbox_only:
+            return Result(None, {'warnings': [], 'sandbox_only': True, 'trace': t['summary']}, t)
+        return Result('print("hi")\n', dict(INFO, trace=t['summary']), t)
+    return run
+
+
+def slash_opts(**flags):
+    return [{'type': 5, 'name': k, 'value': v} for k, v in flags.items()]
+
+
+def test_commands_have_trace_and_sandbox_options():
+    client, svc = make()
+    cmds = dict((c.name, c.to_dict(client.tree)) for c in client.tree.get_commands())
+    svc.close()
+    opt = dict((o['name'], o) for o in cmds['deobf']['options'])
+    assert opt['trace']['type'] == 5 and opt['sandbox']['type'] == 5
+    assert not opt['trace']['required'] and not opt['sandbox']['required']
+    assert all(len(o['description']) <= 100 for o in opt.values())
+
+
+def test_trace_option_sends_the_result_the_report_and_the_payloads():
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        p, att = deobf(extra=slash_opts(trace=True))
+        s = await F.invoke(client, p, cdn={att['url']: b'-- protected'})
+        svc.close()
+        return s
+    final = go(scenario()).edits()[-1]
+    assert seen == [(True, False, False)]
+    names = [f['filename'] for f in final['files']]
+    assert names == ['My_Script_deobf.lua', 'My_Script_trace.txt', 'My_Script_payloads.zip']
+    report = final['files'][1]['content'].decode()
+    assert 'FAKE ROBLOX SANDBOX TRACE  -  My_Script' in report and 'saved as My_Script_payload1.lua' in report
+    assert NAME_MARK not in report and STEM_MARK not in report
+    z = zipfile.ZipFile(io.BytesIO(final['files'][2]['content']))
+    assert z.namelist() == ['My_Script_payload1.lua'] and z.read('My_Script_payload1.lua') == b'print("p1")\n'
+    text = final['form_json']['content']
+    assert 'Fake Roblox run: 40 events' in text and '2 request(s) to `api.example.com`, `cdn.example.org`' in text
+    assert 'Worth a look: Downloads code and runs it' in text and '✅ Done' in text
+
+
+def test_trace_without_payloads_has_no_zip():
+    async def scenario():
+        client, svc = make(run=trace_run(payloads=0))
+        p, att = deobf(extra=slash_opts(trace=True))
+        s = await F.invoke(client, p, cdn={att['url']: b'x'})
+        svc.close()
+        return s
+    names = [f['filename'] for f in go(scenario()).edits()[-1]['files']]
+    assert names == ['My_Script_deobf.lua', 'My_Script_trace.txt']
+
+
+def test_sandbox_option_runs_the_file_as_it_is_and_returns_only_the_report():
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        p, att = deobf(extra=slash_opts(sandbox=True))
+        s = await F.invoke(client, p, cdn={att['url']: b'-- protected'})
+        svc.close()
+        return s
+    final = go(scenario()).edits()[-1]
+    assert seen == [(False, True, False)]
+    assert [f['filename'] for f in final['files']] == ['My_Script_trace.txt', 'My_Script_payloads.zip']
+    text = final['form_json']['content']
+    assert 'Ran the script as given in the fake Roblox (nothing was deobfuscated)' in text
+    assert 'Bytecode check' not in text and 'Detected' not in text
+
+
+@pytest.mark.parametrize('flags,needle', [
+    ({'trace': True, 'sandbox': True}, 'Pick one'),
+    ({'sandbox': True, 'annotate': True}, 'does not deobfuscate'),
+])
+def test_conflicting_options_are_refused_before_anything_runs(flags, needle):
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        p, att = deobf(extra=slash_opts(**flags))
+        s = await F.invoke(client, p, cdn={att['url']: b'x'})
+        svc.close()
+        return s
+    s = go(scenario())
+    assert needle in s.last_text() and seen == []
+
+
+def test_names_file_and_sandbox_are_refused_together():
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        nm = F.attachment(7, 'names.json', 50)
+        extra = [{'type': 11, 'name': 'names', 'value': '7'}] + slash_opts(sandbox=True)
+        p, att = deobf(extra=extra, extra_att=[nm])
+        s = await F.invoke(client, p, cdn={att['url']: b'x', nm['url']: b'{}'})
+        svc.close()
+        return s
+    s = go(scenario())
+    assert 'does not deobfuscate' in s.last_text() and seen == []
+
+
+def test_host_names_chosen_by_the_script_are_not_repeated_as_they_are():
+    nasty = ['evil.example', '**bold**', '<@123456789>', '@everyone', '[click](x', 'a`b', 'xn--80ak6aa92e.com']
+    summary = dict(SUMMARY, requests=7, domains=nasty)
+
+    async def scenario():
+        client, svc = make(run=trace_run(summary=summary))
+        p, att = deobf(extra=slash_opts(trace=True))
+        s = await F.invoke(client, p, cdn={att['url']: b'x'})
+        svc.close()
+        return s
+    text = go(scenario()).edits()[-1]['form_json']['content']
+    assert '`evil.example`' in text and '`xn--80ak6aa92e.com`' in text
+    assert '5 host name(s) with unusual characters' in text
+    for bad in ('**bold**', '<@', '@everyone', '[click]', 'a`b'):
+        assert bad not in text
+
+
+def test_a_big_report_is_zipped_and_one_that_cannot_fit_is_left_out_with_a_note():
+    big = os.urandom(150000).hex() + '\n'          # does not compress well
+
+    async def scenario():
+        client, svc = make(run=trace_run(report=big, payloads=0))
+        p, att = deobf(token='a', extra=slash_opts(trace=True))
+        p['attachment_size_limit'] = 200 * 1024 + 64 * 1024
+        zipped = await F.invoke(client, p, cdn={att['url']: b'x'})
+        p2, _ = deobf(token='b', user=2, extra=slash_opts(trace=True))
+        p2['attachment_size_limit'] = 1024 + 64 * 1024
+        left_out = await F.invoke(client, p2, cdn={att['url']: b'x'})
+        svc.close()
+        return zipped, left_out
+    zipped, left_out = go(scenario())
+    files = zipped.edits()[-1]['files']
+    assert [f['filename'] for f in files] == ['My_Script_deobf.lua', 'My_Script_trace.zip'] and files[1]['content'][:2] == b'PK'
+    last = left_out.edits()[-1]
+    assert [f['filename'] for f in last['files']] == ['My_Script_deobf.lua']
+    assert 'trace report is too large' in last['form_json']['content']
+
+
+def test_the_trace_stage_is_named_while_it_runs():
+    def staged(data, opts, hard_timeout=240, progress=None, cancel=None):
+        progress('sandbox')                          # the bot shows at most one stage a second
+        threading.Event().wait(0.3)
+        return trace_run()(data, opts)
+
+    async def scenario():
+        client, svc = make(run=staged)
+        p, att = deobf(extra=slash_opts(trace=True))
+        s = await F.invoke(client, p, cdn={att['url']: b'x'})
+        svc.close()
+        return s
+    texts = [(c['json'] or c['form_json'] or {}).get('content') or '' for c in go(scenario()).edits()]
+    assert any('running it in the fake Roblox' in t for t in texts)

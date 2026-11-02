@@ -32,14 +32,14 @@ def test_begin_ticks_everything_before_and_leaves_the_rest():
     assert all(ln.startswith('▫️') for ln in ls[2:])
 
 
-def test_engine_stages_move_the_card_and_unknown_ones_are_ignored():
+def test_engine_stages_show_beside_the_detection_step_and_unknown_ones_are_ignored():
     c = Card()
-    for stage, label in (('analyse', 'Detecting obfuscator'), ('unpack', 'Opening the VM'),
-                         ('classify', 'Recognizing handlers'), ('decompile', 'Rebuilding the code'),
-                         ('verify', 'Verifying the result')):
+    for stage, detail in (('analyse', 'reading the loader'), ('unpack', 'opening the VM'),
+                          ('classify', 'recognizing handlers'), ('decompile', 'rebuilding the code'),
+                          ('verify', 'verifying the result'), ('sandbox', 'running it in the fake Roblox')):
         c.stage(stage)
         active = [ln for ln in lines(c) if ln.startswith('**')]
-        assert len(active) == 1 and label in active[0]
+        assert len(active) == 1 and 'Detecting obfuscator' in active[0] and active[0].endswith(' · ' + detail)
     before = lines(c)
     c.stage('no-such-stage')
     assert lines(c) == before
@@ -75,11 +75,10 @@ def test_fail_marks_the_running_step_and_freezes_the_timer():
     c.fail()
     clock.t += 50
     ls = lines(c)
-    assert ls[2].startswith('❌') and 'Recognizing handlers' in ls[2]
-    assert ls[0].startswith('✅') and ls[1].startswith('✅') and ls[3].startswith('▫️')
+    assert ls[0].startswith('❌') and 'Detecting obfuscator' in ls[0] and ls[1].startswith('▫️')
     d = c.data()
     assert d['title'].startswith('❌') and d['footer'] == 'Stopped after 4.0s'
-    c.begin('verify')            # nothing moves once it has stopped
+    c.begin('deliver')           # nothing moves once it has stopped
     assert lines(c) == ls
 
 
@@ -106,5 +105,5 @@ def test_embed_is_a_discord_embed():
     c.begin('detect')
     e = c.embed()
     assert isinstance(e, discord.Embed)
-    assert e.title.endswith('Deobfuscating script') and 'Detecting obfuscator' in e.description
+    assert e.title.endswith('Processing script') and 'Detecting obfuscator' in e.description
     assert e.footer.text.endswith('elapsed')

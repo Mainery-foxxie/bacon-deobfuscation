@@ -8,7 +8,7 @@ import fakediscord as F
 from bgdeobf.engine import EngineError, Result
 from bgdeobf.fetch import FetchError
 from bgdeobf.service import Service
-from test_bot import INFO, deobf, go, make, ok_run
+from test_bot import INFO, SUMMARY, deobf, go, make, ok_run, trace_run
 import time
 
 
@@ -395,3 +395,68 @@ def test_config_for_chat_commands():
     for bad in ({'PREFIX': 'abcd'}, {'PREFIX': 'a b'}, {'URL_HOSTS': 'ex ample!.com'}):
         with pytest.raises(ValueError):
             B.Config(bad)
+
+
+# ------------------------------------------------------------------------------------------ trace / sandbox words
+def test_trace_word_runs_the_result_in_the_fake_roblox_and_sends_all_files():
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        a = att(name='My Hub.lua')
+        s = await F.say(client, '!uwu TRACE', [a], cdn={a['url']: b'-- protected'})
+        svc.close()
+        return s
+    s = go(scenario())
+    assert seen == [(True, False, False)]
+    assert [f['filename'] for f in s.delivered()] == ['My_Hub_deobf.lua', 'My_Hub_trace.txt', 'My_Hub_payloads.zip']
+    text = s.chat_texts()[-1]
+    assert 'Fake Roblox run: 40 events' in text and '`api.example.com`' in text
+    posted = [c for c in s.sent()]
+    assert posted
+    for c in posted:
+        body = c['json'] or c['form_json']
+        assert body['allowed_mentions']['parse'] == []
+
+
+def test_sandbox_word_with_a_url_fetches_the_url_and_returns_only_the_report(spy):
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        s = await F.say(client, '!uwu sandbox https://raw.githubusercontent.com/u/r/main/x.lua')
+        svc.close()
+        return s
+    s = go(scenario())
+    assert spy.calls[0]['url'] == 'https://raw.githubusercontent.com/u/r/main/x.lua'
+    assert seen == [(False, True, False)]
+    assert [f['filename'] for f in s.delivered()] == ['x_trace.txt', 'x_payloads.zip']
+
+
+def test_the_words_are_only_taken_as_whole_words(spy):
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen))
+        s = await F.say(client, '!uwu https://raw.githubusercontent.com/u/r/main/trace.lua')
+        svc.close()
+        return s
+    go(scenario())
+    assert spy.calls[0]['url'] == 'https://raw.githubusercontent.com/u/r/main/trace.lua'
+    assert seen == [(False, False, False)]
+
+
+def test_both_words_together_are_refused_and_a_word_alone_gets_usage():
+    seen = []
+
+    async def scenario():
+        client, svc = make(run=trace_run(seen=seen), COOLDOWN='0')
+        a = att()
+        both = await F.say(client, '!uwu trace sandbox', [a], user_id=1, cdn={a['url']: b'x'})
+        alone = await F.say(client, '!uwu trace', user_id=2)
+        svc.close()
+        return both, alone
+    both, alone = go(scenario())
+    assert 'Pick one' in both.sent()[0]['json']['content'] and seen == []
+    usage = alone.sent()[0]['json']['content']
+    assert 'raw url' in usage and 'trace' in usage and 'sandbox' in usage

@@ -39,7 +39,8 @@ class Rec(B.Responder):
         self.shown.append(card.data())
 
     async def finish(self, text, attachment=None, card=None):
-        self.final = dict(text=text, file=attachment[0] if attachment else None,
+        files = B._file_list(attachment)      # the bot hands over one (name, bytes) or a list of them
+        self.final = dict(text=text, file=files[0][0] if files else None, files=[name for name, _ in files],
                           card=card.data() if card is not None else None)
 
 
@@ -89,7 +90,7 @@ def test_file_job_walks_the_steps_and_ends_green_with_the_file():
     r = run(scenario())
     assert r.shown[0]['footer'] == '0.0s elapsed'
     seen = {ln for d in r.shown for ln in steps(d) if ln.startswith('**')}
-    assert any('Detecting obfuscator' in ln for ln in seen) and any('Verifying the result' in ln for ln in seen)
+    assert any('Detecting obfuscator' in ln for ln in seen) and any('verifying the result' in ln for ln in seen)
     assert len({d['title'][0] for d in r.shown}) > 1                      # the spinner moved
     assert r.final['file'] == 'My_Hub_deobf.lua' and r.final['text'].startswith('✅ Done')
     assert r.final['card']['title'].startswith('✅')

@@ -96,3 +96,21 @@ def test_busy_reasons():
         svc.close()
         return e1.value.reason, e2.value.reason
     assert asyncio.run(scenario()) == ('user_busy', 'queue_full')
+
+
+def test_trace_and_sandbox_are_per_job_and_sandbox_wins():
+    seen = []
+
+    def run(data, opts, **kw):
+        seen.append((opts.trace, opts.sandbox_only))
+        return result()
+
+    async def scenario():
+        svc = Service(run=run)
+        await svc.submit(1, b'a')
+        await svc.submit(1, b'b', trace=True)
+        await svc.submit(1, b'c', sandbox=True)
+        await svc.submit(1, b'd', trace=True, sandbox=True)
+        svc.close()
+    asyncio.run(scenario())
+    assert seen == [(False, False), (True, False), (False, True), (False, True)]
