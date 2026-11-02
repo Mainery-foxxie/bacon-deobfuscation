@@ -54,6 +54,22 @@ def _pump(stream, q):
         q.put(None)
 
 
+def _read_trace(work):
+    """the trace the worker left in its folder (trace.json + payload_<id>.bin), or None"""
+    path = os.path.join(work, 'trace.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding='utf-8') as f:
+            meta = json.load(f)
+        for p in meta['payloads']:
+            with open(os.path.join(work, 'payload_%d.bin' % p['id']), 'rb') as f:
+                p['data'] = f.read()
+        return meta
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def run(data, opts=None, hard_timeout=240, mem_mb=3072, progress=None, cancel=None):
     """Deobfuscate `data` (bytes) in a worker process.  Returns Result; raises EngineError.
     `progress(stage)` is called from the calling thread; `cancel()` -> True aborts the job."""
@@ -123,9 +139,12 @@ def run(data, opts=None, hard_timeout=240, mem_mb=3072, progress=None, cancel=No
                               'the worker stopped unexpectedly (exit %s) %s' % (rc, tail))
         if not final['ok']:
             raise EngineError(final.get('code', 'internal'), final.get('message', 'failed'))
-        with open(os.path.join(work, 'out.lua'), 'rb') as f:
-            text = f.read().decode('utf-8')
-        return Result(text, final['info'])
+        text = None
+        out_path = os.path.join(work, 'out.lua')
+        if os.path.exists(out_path):
+            with open(out_path, 'rb') as f:
+                text = f.read().decode('utf-8')
+        return Result(text, final['info'], _read_trace(work))
     finally:
         if proc is not None and proc.poll() is None:
             _kill(proc)

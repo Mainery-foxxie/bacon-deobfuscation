@@ -40,14 +40,20 @@ class Service(object):
     def running(self):
         return self._running
 
-    def _job_options(self, names, annotate):
+    def _job_options(self, names, annotate, trace=False, sandbox=False, moonveil=False):
         kw = dict(vars(self.options))
         kw['names'] = names
         kw['annotate'] = bool(annotate)
+        kw['trace'] = bool(trace) and not sandbox
+        kw['sandbox_only'] = bool(sandbox)
+        kw['moonveil'] = bool(moonveil) and not sandbox
         return Options(**kw)
 
-    async def submit(self, user_id, data, names=None, annotate=False, progress=None):
+    async def submit(self, user_id, data, names=None, annotate=False, progress=None, trace=False, sandbox=False,
+                     moonveil=False):
         """Run one job.  `progress` is an optional coroutine function called with ('queued', position) or ('stage', name).
+        `trace`: also run the deobfuscated result in the fake Roblox; `sandbox`: only run the script as given in it;
+        `moonveil`: the script is a MoonVeil one (a behaviour reconstruction is made) even when it has no banner.
         Raises Busy when the job is not accepted, EngineError when it fails."""
         if self._sem is None:
             self._sem = asyncio.Semaphore(self.workers)
@@ -74,7 +80,7 @@ class Service(object):
         try:
             loop = asyncio.get_running_loop()
             stages = asyncio.Queue()
-            opts = self._job_options(names, annotate)
+            opts = self._job_options(names, annotate, trace, sandbox, moonveil)
 
             def note(stage):
                 loop.call_soon_threadsafe(stages.put_nowait, stage)

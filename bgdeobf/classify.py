@@ -136,6 +136,11 @@ class Classifier(object):
             if role == 'MKFN':
                 cells[key] = [HostFunc(_noop, 'mkfn')]
         for local, items in L.simple_table_items:
+            if not items:
+                # `local _P = {}` that the handlers read is not a table of handlers: in this build it is the tag that marks a
+                # constant as a table template (`template[1] == _P`).  Left unbound it reads as the test's template tag; seeded
+                # as an empty table it would never match, and DUPTABLE would be taken for NEWTABLE (its fields lost).
+                continue
             tab = LuaTable()
             for key, expr in items:
                 v = self._table_value(expr, cells)

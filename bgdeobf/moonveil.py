@@ -663,11 +663,18 @@ def _wrap(label, items, width=100):
     return lines
 
 
-def header(version, summ, stats):
+def header(version, summ, stats, assumed=False):
+    if assumed:
+        # no banner: the script was handled as a MoonVeil one because the user said so (the `!moonveil` command)
+        what = ['  The script has no MoonVeil banner; it was handled as a MoonVeil script because that was asked for.',
+                '  MoonVeil turns a script into a private VM program, so the original code (its structure, conditions and',
+                '  variable names) cannot be recovered by any tool.']
+    else:
+        who = 'MoonVeil (version not known)' if version in ('', '?') else 'MoonVeil %s' % version
+        what = ['  The script is protected with %s. MoonVeil turns a script into a private VM program, so the original' % who,
+                '  code (its structure, conditions and variable names) cannot be recovered by any tool.']
     out = ['--[[',
-           '  BEHAVIOUR RECONSTRUCTION - THIS IS NOT THE ORIGINAL SOURCE.',
-           '  The script is protected with MoonVeil %s. MoonVeil turns a script into a private VM program, so the original' % version,
-           '  code (its structure, conditions and variable names) cannot be recovered by any tool.',
+           '  BEHAVIOUR RECONSTRUCTION - THIS IS NOT THE ORIGINAL SOURCE.'] + what + [
            '',
            '  What this file is: the protected script was run once in a sandbox against fake Roblox objects (no network,',
            '  no files) and every call it made was written down, in order, with the real names, strings and numbers.',
@@ -713,7 +720,7 @@ def deobfuscate(text, mv, timeout=60, mem_mb=1024, note=None, check=None):
     body = r.render()
     summ = r.summary()
     stats = dict(calls=calls, threads=len(set(b.bid for b in trace.bodies)))
-    text_out = header(mv.get('version', '?'), summ, stats) + body.rstrip() + '\n'
+    text_out = header(mv.get('version', '?'), summ, stats, assumed=bool(mv.get('assumed'))) + body.rstrip() + '\n'
     info = dict(kind='moonveil', trace_only=True, moonveil=dict(mv), lines=text_out.count('\n'), calls=calls,
                 threads=stats['threads'], downloads=summ['downloads'], warnings=[])
     if 'cap' in trace.tags:

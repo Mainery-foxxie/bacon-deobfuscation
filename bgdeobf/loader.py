@@ -6,6 +6,10 @@ class LayoutError(Exception):
     pass
 
 
+# the per-function `dispatchFormat` is stored as `bit32.band(x, 3)`
+FIXED_FORMATS = (0, 1, 2, 3)
+
+
 def is_in(e, name):
     return e is not None and e['type'] == 'AstExprIndexName' and e['index'] == name
 
@@ -318,8 +322,32 @@ class Loader(object):
             raise LayoutError('dispatch chain not found')
         self.dispatch(chain_stmt)
 
+    @staticmethod
+    def stmt_indices(st):
+        """`a, b = T[3], T[8]` / `return T[3], T[8]` / `return {T[3], T[8]}` -> [3, 8]"""
+        if st['type'] == 'AstStatAssign':
+            vals = st['values']
+        elif st['type'] == 'AstStatReturn':
+            vals = st['list']
+            if len(vals) == 1 and unparen(vals[0])['type'] == 'AstExprTable':
+                vals = [it['value'] for it in unparen(vals[0])['items']]
+        else:
+            raise LayoutError('dispatchFormat body')
+        ix = []
+        for v in vals:
+            v = unparen(v)
+            if v['type'] != 'AstExprIndexExpr' or const_num(v['index']) is None:
+                raise LayoutError('dispatchFormat index')
+            ix.append(int(const_num(v['index'])))
+        return ix
+
     def dispatch_perm(self, ifst, n, assign):
-        """`if M.dispatchFormat == k then <assign/return indices>` ladder -> {k: [indices]}"""
+        """`if M.dispatchFormat == k then <assign/return indices>` ladder -> {k: [indices]}.
+        Newer builds have no ladder: the one layout the statement spells out is used by every function, whatever its
+        dispatchFormat (a number 0..3 that is still stored), so it is returned for each of the four values."""
+        if ifst['type'] != 'AstStatIf':
+            ix = self.stmt_indices(ifst)
+            return dict((k, list(ix)) for k in FIXED_FORMATS)
         res = {}
         ch, fin = if_chain(ifst)
         for cond, body, node in ch:
@@ -327,22 +355,7 @@ class Loader(object):
             if not (c['type'] == 'AstExprBinary' and c['op'] == 'CompareEq' and is_in(unparen(c['left']), 'dispatchFormat')):
                 raise LayoutError('dispatchFormat ladder expected')
             k = const_num(c['right'])
-            st = body['body'][0]
-            if st['type'] == 'AstStatAssign':
-                vals = st['values']
-            elif st['type'] == 'AstStatReturn':
-                vals = st['list']
-                if len(vals) == 1 and unparen(vals[0])['type'] == 'AstExprTable':
-                    vals = [it['value'] for it in unparen(vals[0])['items']]
-            else:
-                raise LayoutError('dispatchFormat body')
-            ix = []
-            for v in vals:
-                v = unparen(v)
-                if v['type'] != 'AstExprIndexExpr' or const_num(v['index']) is None:
-                    raise LayoutError('dispatchFormat index')
-                ix.append(int(const_num(v['index'])))
-            res[int(k)] = ix
+            res[int(k)] = self.stmt_indices(body['body'][0])
         return res
 
     def dispatch(self, st):
