@@ -103,6 +103,14 @@ def kconst(c):
     return Const('z', None)
 
 
+def slot_key(i):
+    """the key of an array slot that a SETLIST fills: a number marked so that post.fold_lists can tell it from a store the
+    source wrote as `t[1] = x`"""
+    c = Const('n', i)
+    c.slot = True
+    return c
+
+
 def fmt_num(v):
     if isinstance(v, int):
         return str(v)

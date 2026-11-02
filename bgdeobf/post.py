@@ -564,6 +564,80 @@ def fold_tables(stmts):
     return out
 
 
+def slot_store(t, w):
+    """(slot number, value) when `t` is a store into the table `w` that a SETLIST made, else None"""
+    if t[0] == 'assign' and isinstance(t[1], Idx) and isinstance(t[1].obj, Var) and t[1].obj.web is w:
+        k = t[1].key
+        if isinstance(k, Const) and k.kind == 'n' and getattr(k, 'slot', False):
+            return k.v, t[2]
+    return None
+
+
+def fold_lists(stmts):
+    """`local t = {}` ... `t[1] = a; t[2] = b` (SETLIST stores) -> `local t = {a, b}` where the stores are.
+
+    The compiler creates the table first, so when an item needs a branch (`flag and flag()`) the declaration and the
+    SETLIST end up in different basic blocks.  Making the table later is the same program: nothing can see it before it
+    is filled, and the statements in between must not mention it."""
+    stmts = list(stmts)
+    for i, s in enumerate(stmts):
+        k = s[0]
+        if k == 'if':
+            stmts[i] = ('if', s[1], fold_lists(s[2]), fold_lists(s[3]))
+        elif k == 'while':
+            stmts[i] = ('while', s[1], fold_lists(s[2]))
+        elif k == 'for':
+            stmts[i] = ('for', s[1], s[2], s[3], s[4], fold_lists(s[5]))
+        elif k == 'forin':
+            stmts[i] = ('forin', s[1], s[2], fold_lists(s[3]))
+    i = 0
+    while i < len(stmts):
+        s = stmts[i]
+        if (s[0] == 'local' and isinstance(s[2], Tbl) and not s[2].items and not s[2].fields and not s[2].pending
+                and s[1].kind == 'var' and len(s[1].defs) <= 1):
+            w = s[1]
+            j = i + 1
+            while j < len(stmts) and slot_store(stmts[j], w) is None:
+                cnt = {}
+                count_uses([stmts[j]], cnt)
+                if cnt.get(w):
+                    break
+                j += 1
+            vals = []
+            while j + len(vals) < len(stmts):
+                got = slot_store(stmts[j + len(vals)], w)
+                if got is None or got[0] != len(vals) + 1 or refs(got[1], w):
+                    break
+                vals.append(got[1])
+                if isinstance(got[1], Multi):
+                    break
+            if vals:
+                stmts[i:j + len(vals)] = stmts[i + 1:j] + [('local', w, Tbl(vals))]
+                continue
+        i += 1
+    return stmts
+
+
+def check_open_lists(stmts):
+    """a store of an open result list (`{f()}`) that was not folded back into a constructor cannot be written as an
+    assignment (it would keep only the first value)"""
+    for s in stmts:
+        k = s[0]
+        if k == 'assign' and isinstance(s[1], Idx) and getattr(s[1].key, 'slot', False) and isinstance(s[2], Multi):
+            fn = CUR_FN[0]
+            raise NotImplementedError('SETLIST of an open result list on a table that is not a constructor in progress '
+                                      'in proto %s' % getattr(fn, 'pid', '?'))
+        if k == 'if':
+            check_open_lists(s[2])
+            check_open_lists(s[3])
+        elif k == 'while':
+            check_open_lists(s[2])
+        elif k == 'for':
+            check_open_lists(s[5])
+        elif k == 'forin':
+            check_open_lists(s[3])
+
+
 # ------------------------------------------------------------------------------------------------ hoisting
 def find_list(stmts, lid):
     if id(stmts) == lid:
@@ -817,6 +891,7 @@ def post_passes(body, fn=None):
     for _ in range(6):
         before = sig(body)
         body = fold_values(body)
+        body = fold_lists(body)
         body = fold_tables(body)
         cnt = {}
         count_uses(body, cnt)
@@ -830,5 +905,7 @@ def post_passes(body, fn=None):
         if sig(body) == before:
             break
     body = fold_tables(body)
+    body = fold_lists(body)
+    check_open_lists(body)
     body = hoist_decls(body)
     return body

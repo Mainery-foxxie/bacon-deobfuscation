@@ -233,15 +233,6 @@ class Gen:
                     return False
                 if below_result(w):
                     return False
-            elif w.kind == 'var' and not w.captured and len(w.defs) > 1:
-                # the same for a value with several definitions (`a and b or c`; its tests do not count as uses): stored into
-                # a table that was created after it, it is a local of the source.  Written into the constructor it would be
-                # computed after the table is created.
-                real = [u_ for u_ in w.uses if nodes[u_[0]].kind not in ('JUMPIF', 'JUMPIFNOT')]
-                if len(real) == 1:
-                    u = nodes[real[0][0]]
-                    if u.kind in ('SETTABLEKS', 'SETTABLE') and real[0][1] == u.a['A'] and u.a['A'] < u.a['B']:
-                        w.keep = True
             return ok
 
         def below_result(w):
@@ -639,13 +630,24 @@ class Gen:
                     if mp is None:
                         raise Exception('multret consumer without producer in proto %d' % fn.pid)
                     st['multi'] = None
-                if not (isinstance(tbl.expr, Tbl) and tbl.web is not None and first == 1 + len(tbl.expr.items)):
-                    raise NotImplementedError('SETLIST on a variable table in proto %d' % fn.pid)
                 allp = [tbl] + items + ([mp] if mp is not None else [])
-                settle(allp, False)
-                lv = [l for p in allp for l in p.leaves]
-                new_items = [p.expr for p in items] + ([Multi(mp.expr)] if mp is not None else [])
-                set_def(n, a['A'], Tbl(tbl.expr.items + new_items), lv)
+                if isinstance(tbl.expr, Tbl) and tbl.web is not None and first == 1 + len(tbl.expr.items):
+                    settle(allp, False)
+                    lv = [l for p in allp for l in p.leaves]
+                    new_items = [p.expr for p in items] + ([Multi(mp.expr)] if mp is not None else [])
+                    set_def(n, a['A'], Tbl(tbl.expr.items + new_items), lv)
+                elif isinstance(tbl.expr, Var):
+                    # The table was already written out as a local: a branch between NEWTABLE and this SETLIST (an item
+                    # such as `flag and flag()`) ended the block it was pending in.  The items become numbered stores,
+                    # marked as coming from a SETLIST, and post.fold_lists puts them back into one constructor.
+                    settle(allp, True)
+                    for i_, p in enumerate(items):
+                        stmts.append(('assign', Idx(tbl.expr, slot_key(first + i_)), p.expr))
+                    if mp is not None:
+                        stmts.append(('assign', Idx(tbl.expr, slot_key(first + len(items))), Multi(mp.expr)))
+                    set_def(n, a['A'], tbl.expr, [])
+                else:
+                    raise NotImplementedError('SETLIST on a table that is not a variable in proto %d' % fn.pid)
             elif k == 'RETURN':
                 ops = [rd(n, r) for r in n.reads]
                 if a['B'] == 0:
