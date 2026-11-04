@@ -10,20 +10,9 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def write_trace(workdir, trace):
-    """trace.json (the report and the numbers) and payload_<id>.bin for each captured text"""
-    meta = dict(report=trace['report'], summary=trace['summary'], payloads=[])
-    for p in trace['payloads']:
-        with open(os.path.join(workdir, 'payload_%d.bin' % p['id']), 'wb') as f:
-            f.write(p['data'])
-        meta['payloads'].append(dict((k, v) for k, v in p.items() if k != 'data'))
-    with open(os.path.join(workdir, 'trace.json'), 'w', encoding='utf-8') as f:
-        json.dump(meta, f)
-
-
 def main(argv):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from bgdeobf.engine import EngineError, Options, deobfuscate, sandbox
+    from bgdeobf.engine import EngineError, Options, deobfuscate
     workdir = argv[1]
     try:
         with open(os.path.join(workdir, 'cfg.json')) as f:
@@ -32,14 +21,10 @@ def main(argv):
             data = f.read()
         opts = Options(**cfg)
         progress = lambda s: emit({'stage': s})
-        if opts.sandbox_only:
-            res = sandbox(data, opts, progress=progress)
-        else:
-            res = deobfuscate(data, opts, progress=progress)
-            with open(os.path.join(workdir, 'out.lua'), 'w', encoding='utf-8', newline='\n') as f:
-                f.write(res.text)
-        if res.trace:
-            write_trace(workdir, res.trace)
+        # deobfuscate() refuses the modes engine.py does not have yet (trace / sandbox_only / moonveil) with an EngineError
+        res = deobfuscate(data, opts, progress=progress)
+        with open(os.path.join(workdir, 'out.lua'), 'w', encoding='utf-8', newline='\n') as f:
+            f.write(res.text)
         emit({'ok': True, 'info': res.info})
     except EngineError as e:
         emit({'ok': False, 'code': e.code, 'message': e.message})
