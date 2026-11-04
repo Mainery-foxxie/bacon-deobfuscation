@@ -1,9 +1,7 @@
 """Discord bot.
 
-  /deobf file:<attachment>  or  /deobf url:<raw url>      (options: trace, sandbox: the fake Roblox)
+  /deobf file:<attachment>  or  /deobf url:<raw url>
   !uwu  (+ attachment)   |   !uwu <raw url>   |   reply to a message that has a file/URL with !uwu
-  !uwu trace ...  deobfuscate, then run the result in the fake Roblox;  !uwu sandbox ...  run the file as given in it
-  !moonveil  (+ attachment / raw url / reply)   a MoonVeil script: behaviour reconstruction (it cannot be turned back into source)
   right-click a message -> Apps -> "Deobfuscate file"
 
 Run:  python -m bgdeobf.bot     (token in .env: DISCORD_TOKEN=...)"""
@@ -27,7 +25,6 @@ from .astutil import check_tools
 from .card import Card
 from .engine import EngineError, Options
 from .fetch import FetchError, check_url, extract_url, fetch, normalize_url, url_stem
-from .engine import fill_trace
 from .messages import explain, explain_fetch, verdict
 from .namesfile import NamesError, parse_names
 from .service import Busy, Service
@@ -40,7 +37,6 @@ NAMES_MAX_BYTES = 256 * 1024
 DM_UPLOAD_LIMIT = 10 * 1024 * 1024
 CARD_INTERVAL = 1.2     # seconds between redraws of the progress card (moves the spinner and the timer)
 COMMAND = 'uwu'
-MOONVEIL_COMMAND = 'moonveil'
 NOTE = 'Variable names are automatic guesses. Only analyze scripts you own or are allowed to analyze.'
 
 STAGES = {
@@ -49,7 +45,7 @@ STAGES = {
     'classify': "recognizing this build's handlers",
     'decompile': 'rebuilding the code',
     'verify': 'verifying the result',
-    'sandbox': 'running it in the fake Roblox',
+    'clean': 'cleaning up the result',
 }
 
 INFO = (
@@ -60,25 +56,13 @@ INFO = (
     '• Formats: .lua / .luau / .txt, max {mb:g} MB. GitHub `blob`, Pastebin and Gist links are converted to raw automatically\n'
     '• Takes about 5–60 seconds; the result is re-checked (syntax + bytecode)\n'
     '• Builds that are not recognized are rejected with a clear reason, never guessed\n'
-    '• MoonVeil scripts cannot be turned back into source: you get a `_reconstructed.lua` that lists what the script does, clearly labelled. '
-    '`{p}moonveil` + attachment (or a raw URL, or a reply) asks for exactly that, also when the script has lost its MoonVeil banner; '
-    'add `trace` to get the fake Roblox report as well\n'
     '• `annotate` writes a key next to every variable; fill in a JSON file `{{"12:34": "name"}}` and send it via `names`\n'
-    '• `trace` also runs the result in a fake Roblox (no network, no files) and attaches a report of what it did: requests, remotes, '
-    'windows, loadstring payloads, kicks. `sandbox` skips the deobfuscation and runs the file as it is. In chat: `{p}uwu trace` / `{p}uwu sandbox`\n'
     '• Slash commands: the result is visible only to you by default (`private`). `{p}uwu` replies in the channel\n'
     '-# Use only on scripts you own or are allowed to analyze.'
 )
 
 CHAT_HELP = ('Usage: `{p}uwu` + a .lua attachment, or `{p}uwu <raw url>`. You can also reply to a message that has a file/URL with `{p}uwu`. '
-             'Add `trace` to also run the result in a fake Roblox, or `sandbox` to run the file as it is without deobfuscating. '
-             'For a MoonVeil script use `{p}moonveil` instead. '
              'Example: `{p}uwu https://raw.githubusercontent.com/user/repo/main/script.lua`')
-
-MOONVEIL_HELP = ('Usage: `{p}moonveil` + a .lua attachment, or `{p}moonveil <raw url>`, or reply to a message that has a file/URL with '
-                 '`{p}moonveil`. MoonVeil cannot be turned back into source, so you get a `_reconstructed.lua`: a labelled record of what '
-                 'the script did when it was run in a fake Roblox (its calls, strings and their order). Add `trace` to also get the fake '
-                 'Roblox report (hosts, remotes, captured texts). Use `{p}uwu` for Bacon Guard / FORGE scripts.')
 
 
 def _ids(text):
@@ -172,19 +156,6 @@ def parse_command(content, prefix, command=COMMAND):
 
 
 # ---------------------------------------------------------------------------------------------- where answers go
-def _file_list(attachment):
-    """None | (name, bytes) | [(name, bytes), ...] -> list of (name, bytes)"""
-    if not attachment:
-        return []
-    if isinstance(attachment, tuple):
-        return [attachment]
-    return list(attachment)
-
-
-def _discord_files(attachment):
-    return [discord.File(io.BytesIO(data), filename=name) for name, data in _file_list(attachment)]
-
-
 class Responder(object):
     """The place the answers of one job go: an interaction (slash command / menu) or a chat message."""
     user_id = 0
@@ -205,8 +176,7 @@ class Responder(object):
         raise NotImplementedError
 
     async def finish(self, text, attachment=None, card=None):
-        """attachment: (filename, bytes), a list of them, or None; card: the finished progress card to leave on screen, or
-        None to clear it"""
+        """attachment: (filename, bytes) or None; card: the finished progress card to leave on screen, or None to clear it"""
         raise NotImplementedError
 
 
@@ -240,18 +210,16 @@ class InteractionResponder(Responder):
 
     async def finish(self, text, attachment=None, card=None):
         text = text[:1900]
-        fs = _discord_files(attachment)
+        f = discord.File(io.BytesIO(attachment[1]), filename=attachment[0]) if attachment else None
         if self.i.response.is_done():
             kw = {'content': text, 'embeds': [card.embed()] if card is not None else []}
-            if fs:
-                kw['attachments'] = fs
+            if f is not None:
+                kw['attachments'] = [f]
             await self.i.edit_original_response(**kw)
         else:
             kw = {'content': text, 'ephemeral': True}
-            if len(fs) == 1:
-                kw['file'] = fs[0]
-            elif fs:
-                kw['files'] = fs
+            if f is not None:
+                kw['file'] = f
             await self.i.response.send_message(**kw)
 
 
@@ -268,11 +236,8 @@ class MessageResponder(Responder):
         kw = {'mention_author': False, 'allowed_mentions': discord.AllowedMentions.none()}
         text = text[:1900] if text else None
         for with_reference in (True, False):
-            fs = _discord_files(attachment)
-            if len(fs) == 1:
-                kw['file'] = fs[0]
-            elif fs:
-                kw['files'] = fs
+            if attachment:
+                kw['file'] = discord.File(io.BytesIO(attachment[1]), filename=attachment[0])
             if card is not None:
                 kw['embed'] = card.embed()
             try:
@@ -312,7 +277,7 @@ class MessageResponder(Responder):
             try:
                 kw = {'content': text[:1900], 'embeds': [card.embed()] if card is not None else []}
                 if attachment:
-                    kw['attachments'] = _discord_files(attachment)
+                    kw['attachments'] = [discord.File(io.BytesIO(attachment[1]), filename=attachment[0])]
                 await self.status_msg.edit(**kw)
                 return
             except discord.HTTPException:
@@ -381,13 +346,12 @@ class Handler(object):
         return url, None
 
     # ------------------------------------------------------------ the job
-    async def process(self, interaction, file=None, names_file=None, private=True, annotate=False, url=None, trace=False,
-                      sandbox=False):
+    async def process(self, interaction, file=None, names_file=None, private=True, annotate=False, url=None):
         """slash command / menu entry"""
         return await self.run(InteractionResponder(interaction, private), file=file, url=url, names_file=names_file,
-                              annotate=annotate, trace=trace, sandbox=sandbox)
+                              annotate=annotate)
 
-    async def run(self, r, file=None, url=None, names_file=None, annotate=False, trace=False, sandbox=False, moonveil=False):
+    async def run(self, r, file=None, url=None, names_file=None, annotate=False):
         uid = r.user_id
         if not self.allowed(r):
             return await r.refuse("This bot isn't open to this server/account.")
@@ -400,16 +364,6 @@ class Handler(object):
             return await r.refuse('Include a .lua / .luau / .txt file or a raw URL.')
         if file is not None and url:
             return await r.refuse('Pick one: a file or a URL, not both.')
-        if trace and sandbox:
-            return await r.refuse('Pick one: `trace` (deobfuscate, then run the result in the fake Roblox) or `sandbox` '
-                                  '(run the file as it is, without deobfuscating).')
-        if sandbox and (annotate or names_file is not None):
-            return await r.refuse('`sandbox` does not deobfuscate, so `annotate` and `names` do not apply.')
-        if moonveil and sandbox:
-            return await r.refuse('`%smoonveil` makes the behaviour reconstruction itself. To run a file as it is in the fake Roblox '
-                                  'use `%suwu sandbox`.' % (self.cfg.prefix, self.cfg.prefix))
-        if moonveil and (annotate or names_file is not None):
-            return await r.refuse('A MoonVeil script has no variable names to recover, so `annotate` and `names` do not apply.')
         problem = None
         if file is not None:
             problem = self.check_attachment(file)
@@ -490,8 +444,7 @@ class Handler(object):
 
             try:
                 res = await asyncio.wait_for(
-                    self.service.submit(uid, data, names=names, annotate=annotate, progress=progress, trace=trace,
-                                        sandbox=sandbox, moonveil=moonveil), self.cfg.max_wait)
+                    self.service.submit(uid, data, names=names, annotate=annotate, progress=progress), self.cfg.max_wait)
             except asyncio.TimeoutError:
                 outcome = 'wait_timeout'
                 return await end('The queue took too long and the job was cancelled. Try again later.')
@@ -555,51 +508,22 @@ class Handler(object):
         if end is None:
             async def end(text, attachment=None, ok=False):
                 return await r.finish(text, attachment)
+        body = res.text.encode('utf-8')
+        out_name = stem + ('_annotated.lua' if res.info.get('annotated') else '_deobf.lua')
         limit = r.upload_limit - 64 * 1024
-        files, notes = [], []
-        if res.text is not None:
-            body = res.text.encode('utf-8')
-            out_name = stem + ('_reconstructed.lua' if res.info.get('trace_only')
-                               else '_annotated.lua' if res.info.get('annotated') else '_deobf.lua')
+        note = ''
+        if len(body) > limit:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+                z.writestr(out_name, body)
+            body = buf.getvalue()
+            out_name += '.zip'
+            note = '\nThe result was zipped because it exceeds the server upload limit.'
             if len(body) > limit:
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-                    z.writestr(out_name, body)
-                body = buf.getvalue()
-                out_name += '.zip'
-                notes.append('The result was zipped because it exceeds the server upload limit.')
-                if len(body) > limit:
-                    return await end('The result is too large to upload on this server (%d lines). '
-                                     'Run it through the CLI on your computer.' % res.info.get('lines', 0))
-            files.append((out_name, body))
-            limit -= len(body)
-        if res.trace:
-            report, payloads = fill_trace(res.trace, stem, stem)
-            rb = report.encode('utf-8')
-            if len(rb) > limit:
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-                    z.writestr(stem + '_trace.txt', rb)
-                rb, rname = buf.getvalue(), stem + '_trace.zip'
-            else:
-                rname = stem + '_trace.txt'
-            if len(rb) <= limit:
-                files.append((rname, rb))
-                limit -= len(rb)
-            else:
-                notes.append('The trace report is too large to upload on this server. Use the CLI on your computer.')
-            if payloads:
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-                    for name, data in payloads:
-                        z.writestr(name, data)
-                pb = buf.getvalue()
-                if len(pb) <= limit:
-                    files.append((stem + '_payloads.zip', pb))
-                else:
-                    notes.append('The captured payloads are too large to upload on this server. Use the CLI on your computer.')
-        lines = ['✅ Done (%.0f s)' % seconds] + verdict(res.info, markdown=True)
-        await end('\n'.join(lines) + ''.join('\n' + n for n in notes) + '\n-# ' + NOTE, attachment=files or None, ok=True)
+                return await end('The result is too large to upload on this server (%d lines). '
+                                 'Run it through the CLI on your computer.' % res.info.get('lines', 0))
+        lines = ['✅ Done (%.0f s)' % seconds] + verdict(res.info)
+        await end('\n'.join(lines) + note + '\n-# ' + NOTE, attachment=(out_name, body), ok=True)
 
     # ------------------------------------------------------------ entry points
     async def from_message(self, interaction, message):
@@ -639,20 +563,16 @@ class Handler(object):
                 return None
         return None
 
-    def chat_help(self, moonveil=False):
-        return (MOONVEIL_HELP if moonveil else CHAT_HELP).format(p=self.cfg.prefix)
+    def chat_help(self):
+        return CHAT_HELP.format(p=self.cfg.prefix)
 
-    async def from_chat(self, message, args, moonveil=False):
-        """!uwu / !moonveil: attachment, URL in the command, or the message being replied to"""
+    async def from_chat(self, message, args):
+        """!uwu: attachment, URL in the command, or the message being replied to"""
         r = MessageResponder(message)
         if not self.can_reply(message):
             return
         if args.strip().lower() in ('help', '?', 'bantuan'):
-            return await r.refuse(self.chat_help(moonveil))
-        words = args.split()
-        trace = any(w.lower() == 'trace' for w in words)
-        sandbox = any(w.lower() == 'sandbox' for w in words)
-        args = ' '.join(w for w in words if w.lower() not in ('trace', 'sandbox'))
+            return await r.refuse(self.chat_help())
         file = url = None
         for att in message.attachments:
             if (att.filename or '').lower().endswith(SCRIPT_EXT):
@@ -672,8 +592,8 @@ class Handler(object):
                 if file is None:
                     url = extract_url(ref.content)
         if file is None and url is None:
-            return await r.refuse(self.chat_help(moonveil))
-        return await self.run(r, file=file, url=url, trace=trace, sandbox=sandbox, moonveil=moonveil)
+            return await r.refuse(self.chat_help())
+        return await self.run(r, file=file, url=url)
 
     def info_text(self):
         return INFO.format(mb=self.cfg.max_mb, p=self.cfg.prefix,
@@ -698,19 +618,16 @@ class DeobfClient(discord.Client):
     def _register(self):
         tree, h = self.tree, self.handler
 
-        @tree.command(name='deobf', description='Deobfuscate Roblox scripts (Bacon Guard / FORGE; MoonVeil: behaviour trace)')
+        @tree.command(name='deobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE')
         @app_commands.describe(file='Protected .lua / .luau / .txt file',
                                url='Or the raw URL of the script (https://…)',
                                private='Only you can see the result (default: yes)',
                                annotate='Write a key next to every variable (to build a names file)',
-                               names='JSON file {"key": "name"} used to name variables',
-                               trace='Also run the result in a fake Roblox and attach a report of what it does',
-                               sandbox='Do not deobfuscate: run the file as it is in the fake Roblox')
+                               names='JSON file {"key": "name"} used to name variables')
         async def deobf(interaction: discord.Interaction, file: discord.Attachment = None, url: str = None,
-                        private: bool = True, annotate: bool = False, names: discord.Attachment = None,
-                        trace: bool = False, sandbox: bool = False):
+                        private: bool = True, annotate: bool = False, names: discord.Attachment = None):
             await h.process(interaction, file, names_file=names, private=private, annotate=annotate,
-                            url=extract_url(url) or url if url else None, trace=trace, sandbox=sandbox)
+                            url=extract_url(url) or url if url else None)
 
         @tree.command(name='deobf-info', description='How to use it, limits, and usage notes')
         async def deobf_info(interaction: discord.Interaction):
@@ -731,19 +648,15 @@ class DeobfClient(discord.Client):
     async def on_message(self, message):
         if not self.cfg.prefix_commands or message.author.bot:
             return
-        command, moonveil = COMMAND, False
-        args = parse_command(message.content, self.cfg.prefix, command)
+        args = parse_command(message.content, self.cfg.prefix)
         if args is None:
-            command, moonveil = MOONVEIL_COMMAND, True
-            args = parse_command(message.content, self.cfg.prefix, command)
-            if args is None:
-                return
+            return
         try:
-            await self.handler.from_chat(message, args, moonveil=moonveil)
+            await self.handler.from_chat(message, args)
         except discord.Forbidden:
             log.info('no permission to reply in channel %s', getattr(message.channel, 'id', '?'))
         except Exception:
-            log.exception('failure while handling %s%s', self.cfg.prefix, command)
+            log.exception('failure while handling %s%s', self.cfg.prefix, COMMAND)
 
     async def setup_hook(self):
         if self.cfg.guild_id:
@@ -754,9 +667,8 @@ class DeobfClient(discord.Client):
             await self.tree.sync()
 
     async def on_ready(self):
-        log.info('ready: %s (id %s), %d servers, chat commands: %s', self.user, getattr(self.user, 'id', '?'),
-                 len(self.guilds), '%s%s, %s%s' % (self.cfg.prefix, COMMAND, self.cfg.prefix, MOONVEIL_COMMAND)
-                 if self.cfg.prefix_commands else 'off')
+        log.info('ready: %s (id %s), %d servers, chat command: %s', self.user, getattr(self.user, 'id', '?'),
+                 len(self.guilds), (self.cfg.prefix + COMMAND) if self.cfg.prefix_commands else 'off')
 
     async def close(self):
         self.service.close()

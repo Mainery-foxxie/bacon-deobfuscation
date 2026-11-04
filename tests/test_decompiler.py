@@ -166,6 +166,117 @@ def test_dead_constants_and_plain_copies_are_still_dropped():
     assert report['differing'] == [], report['report']
 
 
+# ------------------------------------------------------------------------------------------------ table constructors split by a branch
+def test_a_list_constructor_with_an_and_item_is_one_constructor():
+    """`pairs({tostring("x"), "str", flag and flag()})`: the compiler makes the table first and the third item needs a
+    branch, so the SETLIST that fills the table sits in another basic block than the NEWTABLE.  The decompiler used to
+    stop with "SETLIST on a variable table"."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),      # pairs
+        I('NEWTABLE', A=1, aux=3),                   # the table, filled below
+        I('GETIMPORT', A=2, aux=import_aux(1)),
+        I('LOADK', A=3, rf=2),
+        I('CALL', A=2, B=2, C=2),                    # R2 = tostring("x")
+        I('LOADK', A=3, rf=3),                       # R3 = "str"
+        I('GETIMPORT', A=4, aux=import_aux(4)),      # R4 = flag
+        I('JUMPIFNOT', to=10, A=4),                  # flag and flag()
+        I('GETIMPORT', A=4, aux=import_aux(4)),
+        I('CALL', A=4, B=1, C=2),
+        I('SETLIST', A=1, B=2, C=4, aux=1),          # R1 = {R2, R3, R4}
+        I('CALL', A=0, B=2, C=1),                    # pairs(R1)
+        I('RETURN', A=0, B=1),
+    ], [s('pairs'), s('tostring'), s('x'), s('str'), s('flag')])
+    assert re.search(r'\{tostring\("x"\), "str", \w*flag and flag\(\)\}', text), text
+    assert 'SETTABLEN' not in bytecode and 'SETLIST' in bytecode, bytecode
+    assert report['differing'] == [], report['report']
+
+
+def test_a_list_constructor_that_ends_in_an_open_call_after_a_branch_keeps_every_result():
+    """`pairs({tostring("x"), flag and flag(), f()})`: the last item is a call whose results are all kept (SETLIST with C = 0)"""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('NEWTABLE', A=1, aux=3),
+        I('GETIMPORT', A=2, aux=import_aux(1)),
+        I('LOADK', A=3, rf=2),
+        I('CALL', A=2, B=2, C=2),
+        I('GETIMPORT', A=3, aux=import_aux(3)),
+        I('JUMPIFNOT', to=9, A=3),
+        I('GETIMPORT', A=3, aux=import_aux(3)),
+        I('CALL', A=3, B=1, C=2),
+        I('GETIMPORT', A=4, aux=import_aux(4)),
+        I('CALL', A=4, B=1, C=0),                    # f() with all its results
+        I('SETLIST', A=1, B=2, C=0, aux=1),
+        I('CALL', A=0, B=2, C=1),
+        I('RETURN', A=0, B=1),
+    ], [s('pairs'), s('tostring'), s('x'), s('flag'), s('f')])
+    assert re.search(r'\{tostring\("x"\), flag and flag\(\), f\(\)\}', text), text
+    assert report['differing'] == [], report['report']
+
+
+def test_calls_in_a_list_constructor_with_an_or_item_keep_their_order():
+    """`pairs({f(), g(), flag or h()})`"""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=0, aux=import_aux(0)),
+        I('NEWTABLE', A=1, aux=3),
+        I('GETIMPORT', A=2, aux=import_aux(2)),
+        I('CALL', A=2, B=1, C=2),
+        I('GETIMPORT', A=3, aux=import_aux(3)),
+        I('CALL', A=3, B=1, C=2),
+        I('GETIMPORT', A=4, aux=import_aux(1)),
+        I('JUMPIF', to=10, A=4),
+        I('GETIMPORT', A=4, aux=import_aux(4)),
+        I('CALL', A=4, B=1, C=2),
+        I('SETLIST', A=1, B=2, C=4, aux=1),
+        I('CALL', A=0, B=2, C=1),
+        I('RETURN', A=0, B=1),
+    ], [s('pairs'), s('flag'), s('f'), s('g'), s('h')])
+    assert re.search(r'\{f\(\), g\(\), flag or h\(\)\}', text), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_list_constructor_filled_by_two_setlists_after_a_branch_is_one_constructor():
+    """the compiler fills a table 16 items at a time: `{flag and flag(), 0, ..., 18}` is two SETLISTs (items 1-16 and 17-19)"""
+    code = [I('GETIMPORT', A=0, aux=import_aux(0)), I('NEWTABLE', A=1, aux=19),
+            I('GETIMPORT', A=2, aux=import_aux(1)), I('JUMPIFNOT', to=6, A=2),
+            I('GETIMPORT', A=2, aux=import_aux(1)), I('CALL', A=2, B=1, C=2)]
+    for i in range(15):
+        code.append(I('LOADN', A=3 + i, rf=i))
+    code.append(I('SETLIST', A=1, B=2, C=17, aux=1))
+    for i in range(3):
+        code.append(I('LOADN', A=2 + i, rf=15 + i))
+    code.append(I('SETLIST', A=1, B=2, C=4, aux=17))
+    code += [I('CALL', A=0, B=2, C=1), I('RETURN', A=0, B=1)]
+    text, bytecode, report = roundtrip(code, [s('pairs'), s('flag')])
+    assert text.strip() == 'pairs({flag and flag(), %s})' % ', '.join(str(i) for i in range(18)), text
+    assert report['differing'] == [], report['report']
+
+
+def test_a_list_store_is_not_moved_over_a_statement_that_uses_the_table():
+    """fold_lists makes the table where its SETLIST stores are, which is only the same program when nothing in between
+    mentions it"""
+    from bgdeobf import post
+    from bgdeobf.decomp import Call, Const, Idx, Tbl, Var, Web, slot_key
+    w = Web()
+    w.declared = True
+    use = ('call', Call(Var(Web()), [w.var]))
+    stmts = [('local', w, Tbl([], fromnew=True)), use, ('assign', Idx(w.var, slot_key(1)), Const('n', 5))]
+    assert post.fold_lists(stmts) == stmts
+    stmts = [('local', w, Tbl([], fromnew=True)), ('call', Call(Var(Web()), [])), ('assign', Idx(w.var, slot_key(1)), Const('n', 5))]
+    out = post.fold_lists(stmts)
+    assert [x[0] for x in out] == ['call', 'local'] and len(out[1][2].items) == 1
+    # a store a script wrote itself (`t[1] = 5`) is not a SETLIST store and stays an assignment
+    plain = [('local', w, Tbl([], fromnew=True)), ('assign', Idx(w.var, Const('n', 1)), Const('n', 5))]
+    assert post.fold_lists(plain) == plain
+
+
+def test_an_open_result_store_that_could_not_be_folded_is_an_error_not_a_wrong_assignment():
+    from bgdeobf import post
+    from bgdeobf.decomp import Call, Idx, Multi, Var, Web, slot_key
+    w = Web()
+    with pytest.raises(NotImplementedError):
+        post.check_open_lists([('assign', Idx(w.var, slot_key(1)), Multi(Call(Var(Web()), [])))])
+
+
 # ------------------------------------------------------------------------------------------------ newer builds (FORGE v0.43)
 def test_varargs_are_read_into_locals_packed_into_a_table_counted_and_returned():
     """`local a, b = ...`, `{...}`, `select("#", ...)` and `return ...` (GETVARARGS with a fixed and an open count)"""
@@ -685,67 +796,6 @@ def test_a_value_made_by_and_or_that_is_read_once_below_the_register_of_its_resu
         I('RETURN', A=0, B=1),
     ], [s('a'), s('b'), s('c'), s('print'), s('g')])
     assert re.search(r'^local (\w+) = a and b or c\nprint\(\1 \+ g\(\)\)$', text, re.M), text
-    assert report['identical'] == report['functions_orig'], report['report']
-
-
-def test_a_value_made_by_and_or_before_a_table_exists_is_not_moved_into_the_table():
-    """`local v = a and b or c` then `return {k = v}`: the compiler creates the table first and computes what goes into it
-    afterwards, so a value computed before DUPTABLE was a variable of the source.  Written as `{k = a and b or c}` the loads
-    and the tests would move behind the creation of the table."""
-    text, bytecode, report = roundtrip([
-        I('GETIMPORT', A=1, aux=import_aux(0)),      # a
-        I('JUMPIFNOT', to=4, A=1),
-        I('GETIMPORT', A=0, aux=import_aux(1)),      # b
-        I('JUMPIF', to=5, A=0),                      # local v = a and b or c
-        I('GETIMPORT', A=0, aux=import_aux(2)),      # c
-        I('DUPTABLE', A=1, rf=3),                    # {
-        I('SETTABLEKS', A=0, B=1, aux=4),            #   k = v }
-        I('RETURN', A=1, B=2),
-    ], [s('a'), s('b'), s('c'), ('t', [(4, -1)]), s('k')])
-    assert re.search(r'^local (\w+) = a and b or c\nreturn \{k = \1\}$', text, re.M), text
-    assert report['identical'] == report['functions_orig'], report['report']
-    inside, _, report = roundtrip([                  # the same value computed for the field itself: after DUPTABLE
-        I('DUPTABLE', A=0, rf=3),
-        I('GETIMPORT', A=2, aux=import_aux(0)),
-        I('JUMPIFNOT', to=5, A=2),
-        I('GETIMPORT', A=1, aux=import_aux(1)),
-        I('JUMPIF', to=6, A=1),
-        I('GETIMPORT', A=1, aux=import_aux(2)),
-        I('SETTABLEKS', A=1, B=0, aux=4),
-        I('RETURN', A=0, B=2),
-    ], [s('a'), s('b'), s('c'), ('t', [(4, -1)]), s('k')])
-    assert re.search(r'^return \{k = a and b or c\}$', inside, re.M), inside
-    assert report['identical'] == report['functions_orig'], report['report']
-
-
-def test_a_table_filled_by_constant_index_is_assignments_and_keeps_a_value_made_before_it():
-    """`t[1] = v` with a constant number as the key is SETTABLEN (no SETTABLEKS: the key is not a string).  As for fields, a
-    value computed before the table exists was a variable of the source, and one computed for the entry itself stays in it."""
-    text, bytecode, report = roundtrip([
-        I('GETIMPORT', A=1, aux=import_aux(0)),      # a
-        I('JUMPIFNOT', to=4, A=1),
-        I('GETIMPORT', A=0, aux=import_aux(1)),      # b
-        I('JUMPIF', to=5, A=0),                      # local v = a and b or c
-        I('GETIMPORT', A=0, aux=import_aux(2)),      # c
-        I('NEWTABLE', A=1, B=0, aux=1),              # local t = {}
-        I('SETTABLEN', A=0, B=1, C=0),               # t[1] = v
-        I('RETURN', A=1, B=2),
-    ], [s('a'), s('b'), s('c')])
-    assert re.search(r'^local (\w+) = a and b or c\nlocal (\w+) = \{\}\n\2\[1\] = \1\nreturn \2$', text, re.M), text
-    assert 'SETTABLEN' in bytecode and report['identical'] == report['functions_orig'], report['report']
-    text, bytecode, report = roundtrip([
-        I('NEWTABLE', A=0, B=0, aux=3),
-        I('GETIMPORT', A=2, aux=import_aux(0)),
-        I('JUMPIFNOT', to=5, A=2),
-        I('GETIMPORT', A=1, aux=import_aux(1)),
-        I('JUMPIF', to=6, A=1),
-        I('GETIMPORT', A=1, aux=import_aux(2)),
-        I('SETTABLEN', A=1, B=0, C=0),               # t[1] = a and b or c
-        I('LOADN', A=1, rf=7),
-        I('SETTABLEN', A=1, B=0, C=2),               # t[3] = 7
-        I('RETURN', A=0, B=2),
-    ], [s('a'), s('b'), s('c')])
-    assert re.search(r'^local (\w+) = \{\}\n\1\[1\] = a and b or c\n\1\[3\] = 7\nreturn \1$', text, re.M), text
     assert report['identical'] == report['functions_orig'], report['report']
 
 

@@ -2,27 +2,24 @@
 import argparse
 import json
 import os
-import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .astutil import check_tools
-from .engine import EngineError, Options, deobfuscate, detect, fill_trace, sandbox
+from .engine import EngineError, Options, deobfuscate, detect
 from .messages import explain, verdict
 from .namesfile import NamesError, parse_names
 from .runner import run
 
 EXTENSIONS = ('.lua', '.luau', '.txt')
-# what this tool writes next to a script: results, the fake Roblox report and the texts it captured (foo_payload1.lua)
-RESULT_NAME = re.compile(r'(_deobf\.lua|_annotated\.lua|_reconstructed\.lua|_trace\.txt|_payload\d+\.(lua|txt))$', re.I)
+RESULT_SUFFIXES = ('_deobf.lua', '_annotated.lua')
 
 
 def expand_inputs(paths):
     """The files named on the command line plus the scripts directly inside every folder named (sorted, no sub-folders).
-    What an earlier run wrote (`*_deobf.lua`, `*_annotated.lua`, `*_reconstructed.lua`, `*_trace.txt`, `*_payload<N>.lua|txt`) found
-    inside a folder is not picked up again.
+    Results of an earlier run (`*_deobf.lua`, `*_annotated.lua`) found inside a folder are not picked up again.
     Returns (files, problems)."""
     files, problems, seen = [], [], set()
     for p in paths:
@@ -30,7 +27,7 @@ def expand_inputs(paths):
             found = []
             for n in sorted(os.listdir(p)):
                 low = n.lower()
-                if low.endswith(EXTENSIONS) and not RESULT_NAME.search(low) and os.path.isfile(os.path.join(p, n)):
+                if low.endswith(EXTENSIONS) and not low.endswith(RESULT_SUFFIXES) and os.path.isfile(os.path.join(p, n)):
                     found.append(os.path.join(p, n))
             if not found:
                 problems.append('No .lua / .luau / .txt scripts found in %s' % p)
@@ -63,33 +60,20 @@ def short_summary(info):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='bgdeobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE (MoonVeil: behaviour reconstruction only).')
+    ap = argparse.ArgumentParser(prog='bgdeobf', description='Deobfuscate Roblox scripts protected with Bacon Guard / FORGE.')
     ap.add_argument('input', nargs='*', help='protected .lua / .luau / .txt file(s) or folder(s) (or - for stdin)')
     ap.add_argument('--check', action='store_true', help='check that the Luau tools are installed and can run')
     ap.add_argument('--detect', action='store_true',
-                    help='only say whether each file is a Bacon Guard / FORGE (or MoonVeil) script and which build; nothing is run')
+                    help='only say whether each file is a Bacon Guard / FORGE script and which build; nothing is run')
     ap.add_argument('-o', '--output', help='output file (default: <name>_deobf.lua, or <name>_annotated.lua with --annotate); '
                                            'with several files or a folder: the output folder (default: next to each input)')
     ap.add_argument('--jobs', type=int, default=1, help='several files or a folder: how many are processed at the same time (default 1)')
     ap.add_argument('--names', help='JSON file {key: name} used to name variables (keys are shown with --annotate)')
     ap.add_argument('--annotate', action='store_true', help='write each variable key into the output, to build a --names file')
     ap.add_argument('--no-verify', action='store_true', help='skip the syntax + bytecode checks')
-    g = ap.add_argument_group('fake Roblox sandbox',
-                              'Runs a script in a pretend Roblox (no network, no files, simulated time) and writes down what it does: '
-                              'requests, remotes, windows, loadstring payloads, kicks, errors ...')
-    g.add_argument('--trace', action='store_true', help='after deobfuscating, run the result in the fake Roblox; writes <name>_trace.txt')
-    g.add_argument('--sandbox', action='store_true',
-                   help='do not deobfuscate: run the script as it is in the fake Roblox; writes <name>_trace.txt')
-    g.add_argument('--explore', action='store_true', help='afterwards press every button the script made, one after another')
-    g.add_argument('--place-id', type=int, default=0, help='game.PlaceId in the fake Roblox (default 0)')
-    g.add_argument('--user-id', type=int, help='UserId of the local player')
-    g.add_argument('--username', help='name of the local player')
-    g.add_argument('--executor', help='what identifyexecutor() answers (default Wave)')
-    g.add_argument('--players', type=int, default=0, help='how many other players are in the server (default 0)')
-    g.add_argument('--responses', help='JSON file {url: text}: what HttpGet / request answer; a url ending in * matches a prefix '
-                                       '(default: an empty text for everything)')
-    g.add_argument('--sandbox-time', type=float, default=30.0, help='simulated seconds to run (default 30)')
-    g.add_argument('--sandbox-timeout', type=int, default=30, help='real seconds before the run is stopped (default 30)')
+    ap.add_argument('--no-clean', action='store_true',
+                    help="keep the decompile exactly as the VM ran it: do not decrypt the protector's string functions, "
+                         "solve its number puzzles or remove its always-true / always-false checks")
     ap.add_argument('--timeout', type=int, default=240, help='hard time limit per file, seconds (default 240)')
     ap.add_argument('--max-mb', type=float, default=3.0, help='maximum file size, MB (default 3)')
     ap.add_argument('--in-process', action='store_true', help='run without a separate process (debugging, no limits)')
@@ -110,23 +94,6 @@ def main(argv=None):
         ap.error('- (standard input) cannot be combined with other inputs')
     if a.jobs > 1 and a.in_process:
         ap.error('--jobs needs the separate worker processes; leave out --in-process')
-    if a.trace and a.sandbox:
-        ap.error('--trace and --sandbox cannot be combined (--sandbox runs the script as given, --trace runs the deobfuscated result)')
-    if a.sandbox and (a.annotate or a.names):
-        ap.error('--sandbox does not deobfuscate, so --annotate and --names do not apply')
-    if not (a.trace or a.sandbox) and (a.explore or a.responses or a.user_id or a.username or a.executor or a.players or a.place_id):
-        ap.error('--explore, --responses, --place-id, --user-id, --username, --executor and --players need --trace or --sandbox')
-    responses = None
-    if a.responses:
-        try:
-            with open(a.responses, 'rb') as f:
-                responses = json.loads(f.read().decode('utf-8'))
-            if not isinstance(responses, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in responses.items()):
-                raise ValueError('it must be one JSON object of strings: {"https://...": "text"}')
-        except (OSError, ValueError) as e:
-            ap.error('invalid --responses file: %s' % e)
-    trace_opts = dict(place_id=a.place_id, user_id=a.user_id, username=a.username, executor=a.executor, other_players=a.players,
-                      responses=responses, explore=a.explore, max_time=a.sandbox_time, timeout=a.sandbox_timeout)
 
     if a.input == ['-']:
         files, problems = ['-'], []
@@ -149,7 +116,7 @@ def main(argv=None):
             print('Invalid --names file: %s' % e, file=sys.stderr)
             return 1
     opts = Options(max_bytes=int(a.max_mb * 1024 * 1024), verify=not a.no_verify, names=names, annotate=a.annotate,
-                   trace=a.trace, sandbox_only=a.sandbox, trace_opts=trace_opts if (a.trace or a.sandbox) else None)
+                   clean=not a.no_clean)
 
     out_dir = None
     if batch:
@@ -170,13 +137,11 @@ def main(argv=None):
     taken, lock = set(), threading.Lock()
 
     def output_path(inp, info):
-        """-o when it names a file; otherwise <name>_deobf.lua (or _annotated, or _trace.txt with --sandbox) in the output
-        folder or next to the input"""
+        """-o when it names a file; otherwise <name>_deobf.lua (or _annotated) in the output folder or next to the input"""
         if a.output and not out_dir:
             return a.output
         stem = 'stdin' if inp == '-' else os.path.splitext(os.path.basename(inp))[0]
-        suffix = ('_trace.txt' if info.get('sandbox_only') else '_reconstructed.lua' if info.get('trace_only')
-                  else '_annotated.lua' if info.get('annotated') else '_deobf.lua')
+        suffix = '_annotated.lua' if info.get('annotated') else '_deobf.lua'
         folder = out_dir or ('.' if inp == '-' else os.path.dirname(os.path.abspath(inp)))
         path, n = os.path.join(folder, stem + suffix), 2
         with lock:
@@ -197,7 +162,7 @@ def main(argv=None):
             return res_
         try:
             if a.in_process:
-                res = sandbox(data, opts, progress=progress) if a.sandbox else deobfuscate(data, opts, progress=progress)
+                res = deobfuscate(data, opts, progress=progress)
             else:
                 res = run(data, opts, hard_timeout=a.timeout, progress=progress)
         except EngineError as e:
@@ -209,18 +174,14 @@ def main(argv=None):
             res_.update(error='%s: %s' % (type(e).__name__, str(e)[:200]), code='internal', seconds=time.time() - t0)
             return res_
         out = output_path(inp, res.info)
-        extra = []
         try:
-            if res.text is not None:
-                with open(out, 'w', encoding='utf-8', newline='\n') as f:
-                    f.write(res.text)
-            if res.trace:
-                extra = write_trace_files(res.trace, 'stdin' if inp == '-' else os.path.basename(inp), out, res.text is None)
+            with open(out, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(res.text)
         except OSError as e:
             res_.update(error='Cannot write the result: %s' % e, code='unwritable')
             res_['seconds'] = time.time() - t0
             return res_
-        res_.update(ok=True, output=out, info=res.info, seconds=time.time() - t0, trace_files=extra)
+        res_.update(ok=True, output=out, info=res.info, seconds=time.time() - t0)
         return res_
 
     t0 = time.time()
@@ -239,9 +200,6 @@ def main(argv=None):
             for line in verdict(r['info']):
                 print(line)
             print('Done in %.1f s -> %s' % (time.time() - t0, r['output']))
-            for path in r.get('trace_files') or []:
-                if path != r['output']:
-                    print('  also written: %s' % path)
         return 0
 
     # ---- several files or a folder
@@ -283,34 +241,9 @@ def main(argv=None):
     return 2 if failed else 0
 
 
-def write_trace_files(trace, name, out, report_is_out):
-    """The report and the captured texts next to the output file `out`: foo_deobf.lua (or foo_reconstructed.lua) -> foo_trace.txt,
-    foo_payload1.lua ...
-    (`report_is_out`: with --sandbox `out` is the report itself).  Returns the paths written."""
-    base = out
-    for suffix in ('_deobf.lua', '_annotated.lua', '_reconstructed.lua', '_trace.txt'):
-        if base.endswith(suffix):
-            base = base[:-len(suffix)]
-            break
-    else:
-        base = os.path.splitext(base)[0]
-    report, files = fill_trace(trace, name, os.path.basename(base))
-    report_path = out if report_is_out else base + '_trace.txt'
-    written = []
-    with open(report_path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write(report)
-    written.append(report_path)
-    for fname, data in files:
-        path = os.path.join(os.path.dirname(base), fname)
-        with open(path, 'wb') as f:
-            f.write(data)
-        written.append(path)
-    return written
-
-
 def detect_files(files, a):
-    """--detect: one line per file `name<TAB>kind<TAB>confidence<TAB>label` (kind: bacon_guard | moonveil | unknown).
-    Exit code 0 when every file is a supported Bacon Guard / FORGE layout or a MoonVeil script (behaviour trace only), 2 when not."""
+    """--detect: one line per file `name<TAB>kind<TAB>confidence<TAB>label` (kind: bacon_guard | unknown).
+    Exit code 0 when every file is a supported Bacon Guard / FORGE layout, 2 when not."""
     rows, bad = [], 0
     for inp in files:
         try:

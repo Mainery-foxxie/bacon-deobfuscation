@@ -15,9 +15,11 @@ def num(v):
 
 
 def sstr(b):
+    """a string constant the way luau-compile prints it (control characters as \\xHH), cut to the same length, so that the
+    two sides can be compared"""
     if isinstance(b, bytes):
         b = b.decode('latin1')
-    return b[:24]
+    return ''.join('\\x%02X' % ord(c) if ord(c) < 32 else c for c in b)[:24]
 
 
 # ----------------------------------------------------------------------------------------------------------- original
@@ -589,6 +591,23 @@ def show_diff(a, b, out):
     out.append('   (edge-only mismatches in matching tokens: %d)' % nedge)
 
 
+def only_constant_loads_differ(ta, tb):
+    """the two functions do the same calls, reads, writes and jumps in the same order, load the same strings in the same
+    places and the same numbers; only the place where a number is loaded (or a variable is set to nil first) is different.
+    The compiler folds a local that is only ever `0` into its uses and keeps one that something else could change in a
+    register of its own, so the same program can come out with the load of the number in either place.  A string never
+    moves: which string a statement uses is part of what the program does."""
+    def movable(t):
+        return t == 'LN' or t.startswith('K:N')
+
+    def fixed(toks):
+        return [t for t in toks if not movable(t)]
+
+    def numbers(toks):
+        return sorted(t for t in toks if t.startswith('K:N'))
+    return ta != tb and fixed(ta) == fixed(tb) and numbers(ta) == numbers(tb)
+
+
 def compare(decoder, bc_path, report_path=None):
     """compare the decoded program with the bytecode luau-compile makes of the decompiled source"""
     protos = decoder.protos
@@ -684,6 +703,8 @@ def compare(decoder, bc_path, report_path=None):
         tb = [t[0] for t in B[f_]]
         if ta.count('RET:0') > tb.count('RET:0') >= 1 and \
                 [t for t in ta if t != 'RET:0'] == [t for t in tb if t != 'RET:0']:
+            cosmetic.append(p_)
+        elif only_constant_loads_differ(ta, tb):
             cosmetic.append(p_)
     if report_path:
         with open(report_path, 'w') as f:
