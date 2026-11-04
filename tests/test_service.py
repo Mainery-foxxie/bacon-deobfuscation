@@ -1,40 +1,25 @@
-"""Worker process: python -I worker.py <workdir>.  Reads <workdir>/cfg.json + in.lua, writes <workdir>/out.lua.
-Talks to the parent with one JSON object per line on stdout."""
-import json
-import os
-import sys
+"""The worker process has to start with the engine that is in the repository, and pass the engine's own errors on.
+
+The bug: worker.py imported `sandbox` from bgdeobf.engine (and read `Result.trace`), but engine.py has neither, so the
+worker died at start-up for every job and the bot answered `internal: the worker stopped unexpectedly (exit 1)`.
+
+These tests go through the real worker subprocess (runner.run), not through the engine in this process."""
+import pytest
+
+from bgdeobf import runner
+from bgdeobf.engine import EngineError, Options
 
 
-def emit(obj):
-    sys.stdout.write(json.dumps(obj) + '\n')
-    sys.stdout.flush()
+@pytest.mark.parametrize('mode', ['trace', 'sandbox_only', 'moonveil'])
+def test_worker_starts_and_relays_the_engine_refusal_of_a_mode_it_does_not_have(mode):
+    # catches: the worker failing to import from engine.py (it then ends with code 'internal' and exit 1)
+    with pytest.raises(EngineError) as info:
+        runner.run(b'print("hello")', Options(**{mode: True}), hard_timeout=60)
+    assert info.value.code == 'unsupported', info.value.message
+    assert mode in info.value.message
 
 
-def main(argv):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from bgdeobf.engine import EngineError, Options, deobfuscate
-    workdir = argv[1]
-    try:
-        with open(os.path.join(workdir, 'cfg.json')) as f:
-            cfg = json.load(f)
-        with open(os.path.join(workdir, 'in.lua'), 'rb') as f:
-            data = f.read()
-        opts = Options(**cfg)
-        progress = lambda s: emit({'stage': s})
-        # deobfuscate() refuses the modes engine.py does not have yet (trace / sandbox_only / moonveil) with an EngineError
-        res = deobfuscate(data, opts, progress=progress)
-        with open(os.path.join(workdir, 'out.lua'), 'w', encoding='utf-8', newline='\n') as f:
-            f.write(res.text)
-        emit({'ok': True, 'info': res.info})
-    except EngineError as e:
-        emit({'ok': False, 'code': e.code, 'message': e.message})
-    except MemoryError:
-        emit({'ok': False, 'code': 'memory', 'message': 'ran out of memory'})
-    except RecursionError:
-        emit({'ok': False, 'code': 'decompile', 'message': 'the program is too deeply nested'})
-    except Exception as e:
-        emit({'ok': False, 'code': 'internal', 'message': '%s: %s' % (type(e).__name__, str(e)[:200])})
-
-
-if __name__ == '__main__':
-    main(sys.argv)
+def test_worker_reports_an_empty_file_without_starting():
+    with pytest.raises(EngineError) as info:
+        runner.run(b'   \n', Options(), hard_timeout=60)
+    assert info.value.code == 'empty'
