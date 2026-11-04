@@ -31,7 +31,7 @@ class EngineError(Exception):
 
 class Options(object):
     def __init__(self, max_bytes=3 * 1024 * 1024, sandbox_timeout=60, sandbox_mem_mb=1024, classify_timeout=120,
-                 verify=True, names=None, annotate=False, clean=True):
+                 verify=True, names=None, annotate=False, clean=True, trace=False, sandbox_only=False, moonveil=False):
         self.max_bytes = max_bytes
         self.sandbox_timeout = sandbox_timeout
         self.sandbox_mem_mb = sandbox_mem_mb
@@ -40,6 +40,10 @@ class Options(object):
         self.names = names
         self.annotate = annotate
         self.clean = clean              # take the protector's source-level junk out of the result (see clean.py)
+        # modes that service.py can ask for.  This engine does not have them yet, so deobfuscate() refuses them.
+        self.trace = trace              # also run the result in the fake Roblox
+        self.sandbox_only = sandbox_only    # only run the script as given in the fake Roblox
+        self.moonveil = moonveil        # treat the script as a MoonVeil one even when it has no banner
 
 
 class Result(object):
@@ -172,6 +176,9 @@ def detect(data, max_bytes=3 * 1024 * 1024):
 
 def deobfuscate(data, opts=None, progress=None):
     opts = opts or Options()
+    modes = [m for m in ('trace', 'sandbox_only', 'moonveil') if getattr(opts, m, False)]
+    if modes:
+        raise EngineError('unsupported', 'this engine has no %s mode (it is not implemented in engine.py yet)' % ' / '.join(modes))
     note = progress or (lambda s: None)
     t0 = time.time()
     timings = {}
