@@ -40,10 +40,13 @@ class Service(object):
     def running(self):
         return self._running
 
-       def _job_options(self, names, annotate, trace=False, sandbox=False, moonveil=False):
+          def _job_options(self, names, annotate, trace=False, sandbox=False, moonveil=False):
         kw = dict(vars(self.options))
         kw['names'] = names
         kw['annotate'] = bool(annotate)
+        kw['trace'] = bool(trace) and not sandbox          # <--- Causes the crash
+        kw['sandbox_only'] = bool(sandbox)                 # <--- Causes the crash
+        kw['moonveil'] = bool(moonveil) and not sandbox    # <--- Causes the crash
         return Options(**kw)
 
     async def submit(self, user_id, data, names=None, annotate=False, progress=None, trace=False, sandbox=False,
