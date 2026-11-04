@@ -1,120 +1,77 @@
-"""Job service shared by every front end (Discord bot, or anything else you plug in).
+"""Regression tests for the hand-over of job options from service.py to engine.py.
 
-It owns the limits: how many jobs run at once, how many may wait, one job per user at a time, a hard deadline per job.
-The heavy work happens in runner.run(), which uses a separate resource-limited process."""
+The bug: Service._job_options adds `trace`, `sandbox_only` and `moonveil` to the keyword arguments of Options(...), and
+engine.Options did not accept them, so every job died before it started with
+    TypeError: Options.__init__() got an unexpected keyword argument 'trace'
+engine.py has no trace / sandbox / moonveil mode yet, so it has to refuse a job that asks for one instead of quietly
+running a normal job.
+
+Plain unittest classes, so `python -m pytest -q tests/` and `python -m unittest` both run them."""
 import asyncio
-import concurrent.futures
-import threading
+import unittest
 
-from . import runner as _runner
-from .engine import Options
+from bgdeobf.engine import EngineError, Options, deobfuscate
+from bgdeobf.service import Service
 
-
-class Busy(Exception):
-    """reason: 'queue_full' | 'user_busy'"""
-
-    def __init__(self, reason):
-        Exception.__init__(self, reason)
-        self.reason = reason
+MODES = ('trace', 'sandbox_only', 'moonveil')
 
 
-class Service(object):
-    def __init__(self, workers=2, max_queue=8, options=None, hard_timeout=240, run=None):
-        self.workers = max(1, int(workers))
-        self.max_queue = max(0, int(max_queue))
-        self.options = options or Options()
-        self.hard_timeout = hard_timeout
-        self._run = run or _runner.run
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix='bgdeobf')
-        self._sem = None
-        self._queued = 0
-        self._running = 0
-        self._users = set()
-        self.stats = dict(ok=0, failed=0, rejected=0)
+def options_seen_by_runner(**submit_kwargs):
+    """Run one job through a real Service whose runner is a fake (the real one starts a separate process); returns the
+    Options object the runner was handed."""
+    seen = []
 
-    @property
-    def queued(self):
-        return self._queued
+    def fake_run(data, opts, hard_timeout=None, progress=None, cancel=None):
+        seen.append(opts)
+        return 'finished'
 
-    @property
-    def running(self):
-        return self._running
+    svc = Service(workers=1, run=fake_run)
+    try:
+        asyncio.run(svc.submit(1, b'print(1)', **submit_kwargs))
+    finally:
+        svc.close()
+    return seen[0]
 
-          def _job_options(self, names, annotate, trace=False, sandbox=False, moonveil=False):
-        kw = dict(vars(self.options))
-        kw['names'] = names
-        kw['annotate'] = bool(annotate)
-        kw['trace'] = bool(trace) and not sandbox          # <--- Causes the crash
-        kw['sandbox_only'] = bool(sandbox)                 # <--- Causes the crash
-        kw['moonveil'] = bool(moonveil) and not sandbox    # <--- Causes the crash
-        return Options(**kw)
 
-    async def submit(self, user_id, data, names=None, annotate=False, progress=None, trace=False, sandbox=False,
-                     moonveil=False):
-        """Run one job.  `progress` is an optional coroutine function called with ('queued', position) or ('stage', name).
-        `trace`: also run the deobfuscated result in the fake Roblox; `sandbox`: only run the script as given in it;
-        `moonveil`: the script is a MoonVeil one (a behaviour reconstruction is made) even when it has no banner.
-        Raises Busy when the job is not accepted, EngineError when it fails."""
-        if self._sem is None:
-            self._sem = asyncio.Semaphore(self.workers)
-        if user_id in self._users:
-            self.stats['rejected'] += 1
-            raise Busy('user_busy')
-        if self._queued >= self.max_queue and self._running >= self.workers:
-            self.stats['rejected'] += 1
-            raise Busy('queue_full')
-        self._users.add(user_id)
-        self._queued += 1
-        try:
-            if progress is not None and self._running >= self.workers:
-                await progress(('queued', self._queued))
-            await self._sem.acquire()
-        except BaseException:
-            self._queued -= 1
-            self._users.discard(user_id)
-            raise
-        self._queued -= 1
-        self._running += 1
-        pump = None
-        stop = threading.Event()
-        try:
-            loop = asyncio.get_running_loop()
-            stages = asyncio.Queue()
-            opts = self._job_options(names, annotate, trace, sandbox, moonveil)
+class ServiceHandsOptionsToTheRunner(unittest.TestCase):
+    def test_plain_job_reaches_the_runner_with_its_options(self):
+        # catches: Service building Options with a keyword Options does not accept (the reported crash)
+        opts = options_seen_by_runner(names={'1:2': 'x'}, annotate=True)
+        self.assertEqual(opts.names, {'1:2': 'x'})
+        self.assertIs(opts.annotate, True)
+        for mode in MODES:
+            self.assertIs(getattr(opts, mode), False, mode)
 
-            def note(stage):
-                loop.call_soon_threadsafe(stages.put_nowait, stage)
+    def test_requested_modes_reach_the_options(self):
+        # catches: a mode dropped on the way, or `sandbox` not switching the other two off
+        table = [
+            (dict(trace=True), (True, False, False)),
+            (dict(sandbox=True), (False, True, False)),
+            (dict(moonveil=True), (False, False, True)),
+            (dict(trace=True, sandbox=True, moonveil=True), (False, True, False)),
+        ]
+        for kwargs, want in table:
+            with self.subTest(**kwargs):
+                opts = options_seen_by_runner(**kwargs)
+                self.assertEqual(tuple(getattr(opts, m) for m in MODES), want)
 
-            async def relay():
-                while True:
-                    stage = await stages.get()
-                    try:
-                        await progress(('stage', stage))
-                    except Exception:
-                        pass
 
-            if progress is not None:
-                pump = asyncio.ensure_future(relay())
-            fut = loop.run_in_executor(self._pool, lambda: self._run(data, opts, hard_timeout=self.hard_timeout,
-                                                                     progress=note, cancel=stop.is_set))
-            try:
-                res = await fut
-            except asyncio.CancelledError:
-                stop.set()
-                raise
-            self.stats['ok'] += 1
-            return res
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.stats['failed'] += 1
-            raise
-        finally:
-            if pump is not None:
-                pump.cancel()
-            self._running -= 1
-            self._sem.release()
-            self._users.discard(user_id)
+class EngineRefusesModesItDoesNotHave(unittest.TestCase):
+    def test_each_unimplemented_mode_is_refused_before_any_work(self):
+        # catches: a requested mode being silently ignored while a normal run starts.  An empty file fails with code
+        # 'empty' once a run starts, so 'unsupported' proves the refusal came first.
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                with self.assertRaises(EngineError) as cm:
+                    deobfuscate(b'', Options(**{mode: True}))
+                self.assertEqual(cm.exception.code, 'unsupported')
 
-    def close(self):
-        self._pool.shutdown(wait=False, cancel_futures=True)
+    def test_ordinary_options_are_not_refused(self):
+        # catches: the refusal firing on ordinary jobs
+        with self.assertRaises(EngineError) as cm:
+            deobfuscate(b'', Options())
+        self.assertEqual(cm.exception.code, 'empty')
+
+
+if __name__ == '__main__':
+    unittest.main()
