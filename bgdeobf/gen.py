@@ -233,6 +233,15 @@ class Gen:
                     return False
                 if below_result(w):
                     return False
+            elif w.kind == 'var' and not w.captured and len(w.defs) > 1:
+                # the same for a value with several definitions (`a and b or c`; its tests do not count as uses): stored into
+                # a table that was created after it, it is a local of the source.  Written into the constructor it would be
+                # computed after the table is created.
+                real = [u_ for u_ in w.uses if nodes[u_[0]].kind not in ('JUMPIF', 'JUMPIFNOT')]
+                if len(real) == 1:
+                    u = nodes[real[0][0]]
+                    if u.kind in ('SETTABLEKS', 'SETTABLE') and real[0][1] == u.a['A'] and u.a['A'] < u.a['B']:
+                        w.keep = True
             return ok
 
         def below_result(w):

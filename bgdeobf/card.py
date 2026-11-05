@@ -15,7 +15,7 @@ import time
 
 SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 RUNNING, DONE, FAILED = 0x4E5058, 0x57F287, 0xED4245
-MARK = {'todo': '▫', 'done': '✅', 'failed': '❌'}
+MARK = {'todo': '▫️', 'done': '✅', 'failed': '❌'}      # the small square with U+FE0F, so it is drawn as an emoji like the others
 
 FILE_STEPS = [
     ('detect', 'Detecting obfuscator'),
@@ -27,7 +27,7 @@ URL_STEPS = [('validate', 'Validating URL'), ('download', 'Downloading content')
 # as a short note next to it so a 25 s job does not look stuck.
 ENGINE_STAGE = {'analyse': 'reading the loader', 'unpack': 'opening the VM', 'classify': 'recognizing handlers',
                 'decompile': 'rebuilding the code', 'verify': 'verifying the result',
-                'clean': 'cleaning up the result'}
+                'clean': 'cleaning up the result', 'sandbox': 'running it in the fake Roblox'}
 
 
 class Card(object):

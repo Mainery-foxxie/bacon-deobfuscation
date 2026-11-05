@@ -799,6 +799,67 @@ def test_a_value_made_by_and_or_that_is_read_once_below_the_register_of_its_resu
     assert report['identical'] == report['functions_orig'], report['report']
 
 
+def test_a_value_made_by_and_or_before_a_table_exists_is_not_moved_into_the_table():
+    """`local v = a and b or c` then `return {k = v}`: the compiler creates the table first and computes what goes into it
+    afterwards, so a value computed before DUPTABLE was a variable of the source.  Written as `{k = a and b or c}` the loads
+    and the tests would move behind the creation of the table."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=1, aux=import_aux(0)),      # a
+        I('JUMPIFNOT', to=4, A=1),
+        I('GETIMPORT', A=0, aux=import_aux(1)),      # b
+        I('JUMPIF', to=5, A=0),                      # local v = a and b or c
+        I('GETIMPORT', A=0, aux=import_aux(2)),      # c
+        I('DUPTABLE', A=1, rf=3),                    # {
+        I('SETTABLEKS', A=0, B=1, aux=4),            #   k = v }
+        I('RETURN', A=1, B=2),
+    ], [s('a'), s('b'), s('c'), ('t', [(4, -1)]), s('k')])
+    assert re.search(r'^local (\w+) = a and b or c\nreturn \{k = \1\}$', text, re.M), text
+    assert report['identical'] == report['functions_orig'], report['report']
+    inside, _, report = roundtrip([                  # the same value computed for the field itself: after DUPTABLE
+        I('DUPTABLE', A=0, rf=3),
+        I('GETIMPORT', A=2, aux=import_aux(0)),
+        I('JUMPIFNOT', to=5, A=2),
+        I('GETIMPORT', A=1, aux=import_aux(1)),
+        I('JUMPIF', to=6, A=1),
+        I('GETIMPORT', A=1, aux=import_aux(2)),
+        I('SETTABLEKS', A=1, B=0, aux=4),
+        I('RETURN', A=0, B=2),
+    ], [s('a'), s('b'), s('c'), ('t', [(4, -1)]), s('k')])
+    assert re.search(r'^return \{k = a and b or c\}$', inside, re.M), inside
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
+def test_a_table_filled_by_constant_index_is_assignments_and_keeps_a_value_made_before_it():
+    """`t[1] = v` with a constant number as the key is SETTABLEN (no SETTABLEKS: the key is not a string).  As for fields, a
+    value computed before the table exists was a variable of the source, and one computed for the entry itself stays in it."""
+    text, bytecode, report = roundtrip([
+        I('GETIMPORT', A=1, aux=import_aux(0)),      # a
+        I('JUMPIFNOT', to=4, A=1),
+        I('GETIMPORT', A=0, aux=import_aux(1)),      # b
+        I('JUMPIF', to=5, A=0),                      # local v = a and b or c
+        I('GETIMPORT', A=0, aux=import_aux(2)),      # c
+        I('NEWTABLE', A=1, B=0, aux=1),              # local t = {}
+        I('SETTABLEN', A=0, B=1, C=0),               # t[1] = v
+        I('RETURN', A=1, B=2),
+    ], [s('a'), s('b'), s('c')])
+    assert re.search(r'^local (\w+) = a and b or c\nlocal (\w+) = \{\}\n\2\[1\] = \1\nreturn \2$', text, re.M), text
+    assert 'SETTABLEN' in bytecode and report['identical'] == report['functions_orig'], report['report']
+    text, bytecode, report = roundtrip([
+        I('NEWTABLE', A=0, B=0, aux=3),
+        I('GETIMPORT', A=2, aux=import_aux(0)),
+        I('JUMPIFNOT', to=5, A=2),
+        I('GETIMPORT', A=1, aux=import_aux(1)),
+        I('JUMPIF', to=6, A=1),
+        I('GETIMPORT', A=1, aux=import_aux(2)),
+        I('SETTABLEN', A=1, B=0, C=0),               # t[1] = a and b or c
+        I('LOADN', A=1, rf=7),
+        I('SETTABLEN', A=1, B=0, C=2),               # t[3] = 7
+        I('RETURN', A=0, B=2),
+    ], [s('a'), s('b'), s('c')])
+    assert re.search(r'^local (\w+) = \{\}\n\1\[1\] = a and b or c\n\1\[3\] = 7\nreturn \1$', text, re.M), text
+    assert report['identical'] == report['functions_orig'], report['report']
+
+
 def test_a_variable_that_a_loop_assigns_and_returns_keeps_its_assignment():
     """`local flag = false`, then inside a loop `flag = true return flag`: the temporaries of a `for` loop sit above the
     loop's own registers, so a write to a lower register is an assignment to a variable declared before the loop.  Printed

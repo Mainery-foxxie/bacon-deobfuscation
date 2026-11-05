@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import time
 
-from . import fidelity
+from . import fidelity, moonveil
 from .astutil import LuauError, LuauMissing, LuauSyntax, LuauTimeout, find_bin, normalize_source
 from .classify import ClassifyError, Classifier, collect_domains, RAWF
 from .clean import clean_source
@@ -30,8 +30,13 @@ class EngineError(Exception):
 
 
 class Options(object):
+    """`trace`: after deobfuscating, also run the result in the fake Roblox (tracer.py).  `sandbox_only`: do not deobfuscate,
+    run the script as given.  `trace_opts`: dict of tracer.TraceOptions values.  `moonveil`: the script is a MoonVeil one even
+    when it has no banner that says so (the `!moonveil` command); it is never taken for a Bacon Guard script then."""
+
     def __init__(self, max_bytes=3 * 1024 * 1024, sandbox_timeout=60, sandbox_mem_mb=1024, classify_timeout=120,
-                 verify=True, names=None, annotate=False, clean=True):
+                 verify=True, names=None, annotate=False, trace=False, sandbox_only=False, trace_opts=None, moonveil=False,
+                 clean=True):
         self.max_bytes = max_bytes
         self.sandbox_timeout = sandbox_timeout
         self.sandbox_mem_mb = sandbox_mem_mb
@@ -39,14 +44,80 @@ class Options(object):
         self.verify = verify
         self.names = names
         self.annotate = annotate
+        self.trace = trace
+        self.sandbox_only = sandbox_only
+        self.trace_opts = trace_opts
+        self.moonveil = moonveil
         self.clean = clean              # take the protector's source-level junk out of the result (see clean.py)
 
 
 class Result(object):
-    def __init__(self, text, info, raw=None):
+    """text: the deobfuscated script (None when only the sandbox ran).  trace: None or the dict made by run_trace.
+    raw: the decompiled text before the cleanup, when the cleanup changed it."""
+
+    def __init__(self, text, info, trace=None, raw=None):
         self.text = text
         self.info = info
-        self.raw = raw                  # the decompiled text before the cleanup, when the cleanup changed it
+        self.trace = trace
+        self.raw = raw
+
+
+NAME_MARK = '@@NAME@@'
+STEM_MARK = '@@STEM@@'
+
+
+def run_trace(source, opts, note=None, lines_of='the script'):
+    """Run `source` (bytes) in the fake Roblox.  Returns dict(report, payloads=[(kind, name, label, bytes)], summary).  The report
+    carries the marks NAME_MARK and STEM_MARK where the front end puts the file's name (see fill_trace).
+    Raises tracer.TraceError."""
+    from . import tracer
+    topts = tracer.TraceOptions.from_dict(opts.trace_opts)
+    topts.max_bytes = max(topts.max_bytes, opts.max_bytes)
+    res = tracer.run(source, topts, progress=note)
+    report = tracer.render_report(res, name=NAME_MARK, lines_of=lines_of, stem=STEM_MARK)
+    payloads = [dict(id=p.id, kind=p.kind, label=p.label, length=p.length, data=p.data, ext=tracer.payload_name('x', p).rsplit('.', 1)[1])
+                for p in res.payloads]
+    return dict(report=report, payloads=payloads, summary=tracer.summary_info(res))
+
+
+def fill_trace(trace, name, stem):
+    """-> (report text, [(file name, bytes)]) for a trace dict, with the file's name and the stem of the output files filled in"""
+    report = trace['report'].replace(NAME_MARK, name).replace(STEM_MARK, stem)
+    files = [('%s_payload%d.%s' % (stem, p['id'], p['ext']), p['data']) for p in trace['payloads']]
+    return report, files
+
+
+def sandbox(data, opts=None, progress=None):
+    """Run a script as it is (no deobfuscation) in the fake Roblox.  Returns Result(None, info, trace)."""
+    opts = opts or Options()
+    note = progress or (lambda s: None)
+    if not data or not data.strip():
+        raise EngineError('empty', 'the file is empty')
+    if len(data) > opts.max_bytes:
+        raise EngineError('too_big', 'the file is larger than %d bytes' % opts.max_bytes)
+    if b'\x00' in data[:4096]:
+        raise EngineError('binary', 'the file does not look like a text script')
+    info = {'warnings': [], 'sandbox_only': True}
+    m = BANNER.search(normalize_source(data)[:4000])
+    if m:
+        info['banner'] = dict(version=m.group(1), protection=m.group(2), build=m.group(3))
+    t0 = time.time()
+    try:
+        trace = run_trace(data, opts, note, lines_of='the script as given')
+    except _trace_errors() as e:
+        raise EngineError(_trace_code(e), e.message)
+    info['trace'] = trace['summary']
+    info['timings'] = {'total': round(time.time() - t0, 2)}
+    return Result(None, info, trace)
+
+
+def _trace_errors():
+    from .tracer import TraceError
+    return TraceError
+
+
+def _trace_code(e):
+    return {'setup': 'setup', 'empty': 'empty', 'too_big': 'too_big', 'sandbox': 'sandbox'}.get(e.code, 'internal')
 
 
 def _check_perms(L):
@@ -139,6 +210,11 @@ def detect(data, max_bytes=3 * 1024 * 1024):
     if b'\x00' in data[:4096]:
         return answer('unknown', 0.0, 'not a text script', None, 'the file looks like binary / bytecode')
     text = normalize_source(data)
+    mv = moonveil.detect(text)
+    if mv:
+        return answer('moonveil', 1.0, 'MoonVeil %s (behaviour trace only)' % mv['version'], None,
+                      'MoonVeil cannot be turned back into source; a behaviour reconstruction is written instead',
+                      supported=True)
     m = BANNER.search(text[:4000])
     banner = dict(version=m.group(1), protection=m.group(2), build=m.group(3)) if m else None
     name = 'Bacon Guard v%s (%s), build %s' % (banner['version'], banner['protection'], banner['build']) if banner else None
@@ -170,6 +246,39 @@ def detect(data, max_bytes=3 * 1024 * 1024):
     return answer('unknown', 0.0, 'not a Bacon Guard / FORGE script', None, problem)
 
 
+def _moonveil(text, mv, opts, note):
+    """MoonVeil cannot be decompiled; the script is run in the trace sandbox and its behaviour is written down"""
+    note('analyse')
+
+    def check(out):
+        try:
+            ok, msg, _ = compile_check(out)
+        except (LuauError, subprocess.TimeoutExpired, OSError) as e:
+            return None, 'compile check unavailable: %s' % e
+        return ok, msg
+    try:
+        out, info = moonveil.deobfuscate(text, mv, timeout=opts.sandbox_timeout, mem_mb=opts.sandbox_mem_mb, note=note,
+                                         check=check if opts.verify else None)
+    except moonveil.TraceError as e:
+        raise EngineError({'setup': 'setup', 'timeout': 'timeout', 'syntax': 'syntax'}.get(e.code, 'unsupported'),
+                          e.message)
+    return Result(out, info)
+
+
+def _moonveil_job(data, text, mv, opts, note):
+    """A MoonVeil script: the behaviour reconstruction and, with `trace`, also the fake Roblox report of the script as given
+    (the reconstruction is a record of one run; the report adds what the run showed: hosts, payloads, what looks risky)."""
+    res = _moonveil(text, mv, opts, note)
+    if opts.trace:
+        note('sandbox')
+        try:
+            res.trace = run_trace(data, opts, note, lines_of='the script as given')
+            res.info['trace'] = res.trace['summary']
+        except _trace_errors() as e:
+            res.info['warnings'].append('the fake Roblox report could not be made: ' + scrub(e.message))
+    return res
+
+
 def deobfuscate(data, opts=None, progress=None):
     opts = opts or Options()
     note = progress or (lambda s: None)
@@ -188,6 +297,15 @@ def deobfuscate(data, opts=None, progress=None):
     if b'\x00' in data[:4096]:
         raise EngineError('binary', 'the file does not look like a text script')
     text = normalize_source(data)
+    mv = moonveil.detect(text)
+    if mv is None and opts.moonveil:
+        # asked for as a MoonVeil script, but the banner that would say so is missing.  The recording run does not need it;
+        # a script that carries a Bacon Guard banner is not one, though, and is not run as one.
+        if BANNER.search(text[:4000]):
+            raise EngineError('unsupported', 'this is a Bacon Guard / FORGE script, not a MoonVeil one; use the normal command for it')
+        mv = dict(version='?', assumed=True)
+    if mv:
+        return _moonveil_job(data, text, mv, opts, note)
     m = BANNER.search(text[:4000])
     if m:
         info['banner'] = dict(version=m.group(1), protection=m.group(2), build=m.group(3))
@@ -312,7 +430,8 @@ def deobfuscate(data, opts=None, progress=None):
             info['warnings'].append(msg)
         timings['verify'] = time.time() - t
 
-    # ---- 6. source-level cleanup (the bytecode check above was made on the raw text, which is the faithful one)
+    # ---- 6. source-level cleanup (the bytecode check above was made on the raw text, which is the faithful one).  It comes
+    # before the fake Roblox run, so that the run is made on the script the user gets.
     raw = None
     if opts.clean and not opts.annotate:
         t = stage('clean')
@@ -330,6 +449,26 @@ def deobfuscate(data, opts=None, progress=None):
         except Exception as e:
             info['warnings'].append('the cleanup was skipped (%s)' % type(e).__name__)
         timings['clean'] = time.time() - t
+
+    # ---- 7. the fake Roblox run
+    trace = None
+    if opts.trace:
+        t = stage('sandbox')
+        clean = text_out
+        if opts.annotate:
+            try:
+                clean = render(dec, namemap=opts.names, main_pid=dump.main, annotate=False).text
+            except Exception:
+                clean = None
+        if clean is None:
+            info['warnings'].append('the fake Roblox run was skipped: there is no clean copy of the annotated script')
+        else:
+            try:
+                trace = run_trace(clean.encode('utf-8'), opts, note, lines_of='the deobfuscated script')
+                info['trace'] = trace['summary']
+            except _trace_errors() as e:
+                info['warnings'].append('the fake Roblox run failed: ' + scrub(e.message))
+        timings['sandbox'] = time.time() - t
     timings['total'] = time.time() - t0
     info['timings'] = dict((k, round(v, 2)) for k, v in timings.items())
-    return Result(text_out, info, raw)
+    return Result(text_out, info, trace, raw)
