@@ -154,6 +154,7 @@ def test_wrong_extension_and_bad_urls_are_refused_without_fetching(spy):
     (FetchError('http', 'the server answered HTTP 404'), 'HTTP 404'), (FetchError('timeout', 'x'), 'too long'),
     (FetchError('blocked', 'that address is not a public address'), 'was rejected'), (FetchError('empty', 'x'), 'empty'),
     (FetchError('net', 'could not connect'), "Couldn't fetch"),
+    (FetchError('loader', 'the server answered HTTP 403'), 'only runs inside Roblox'),
 ])
 def test_fetch_errors_are_explained(monkeypatch, error, needle):
     monkeypatch.setattr(B, 'fetch', FetchSpy(error=error))

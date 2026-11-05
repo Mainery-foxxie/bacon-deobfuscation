@@ -5,7 +5,9 @@
   uses, so a DNS answer cannot change between the check and the connect
 - redirects are followed by hand and every hop is checked again
 - hard limits on size (also after decompression) and time
-- no cookies, no proxy from the environment"""
+- no cookies, no proxy from the environment
+- a paste site that answers with its Roblox-only loader instead of the script (see paste_envelope.py) gets one more
+  request, for the script link written in the loader: same site, same checks, same limits, same headers"""
 import asyncio
 import ipaddress
 import re
@@ -16,12 +18,15 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from aiohttp import abc as aiohttp_abc
 
+from .paste_envelope import stream_url
+
 USER_AGENT = 'bgdeobf-bot/1.0 (script fetch)'
 URL_RE = re.compile(r'https?://[^\s<>"\'`)\]]+', re.I)
 
 
 class FetchError(Exception):
-    """code: bad_url | blocked | http | html | too_big | empty | timeout | net"""
+    """code: bad_url | blocked | http | html | too_big | empty | timeout | net | loader
+    (loader: the site gave its Roblox-only loader and the script link inside it did not give the script)"""
 
     def __init__(self, code, message):
         Exception.__init__(self, message)
@@ -201,10 +206,32 @@ async def _fetch(url, max_bytes, hosts, timeout, max_redirects, resolver, user_a
 
 async def fetch(url, max_bytes, hosts=None, timeout=25, max_redirects=3, resolver=None, user_agent=USER_AGENT,
                 ports=(80, 443)):
-    """download `url` (already extracted from the message); returns bytes or raises FetchError"""
+    """download `url` (already extracted from the message); returns bytes or raises FetchError.
+
+    When the answer is a paste site's Roblox-only loader, the script link written in it is requested as well (one step
+    only, nothing is run) and that content is returned instead"""
     url = normalize_url(url)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async def get(target, budget):
+        try:
+            return await asyncio.wait_for(
+                _fetch(target, max_bytes, hosts, budget, max_redirects, resolver, user_agent, ports), budget + 5)
+        except asyncio.TimeoutError:
+            raise FetchError('timeout', 'the server took too long to respond')
+
+    data = await get(url, timeout)
+    link = stream_url(data, url)
+    if link is None:
+        return data
+    left = min(timeout, max(5, timeout - (loop.time() - started)))      # the second request shares the time budget
     try:
-        return await asyncio.wait_for(
-            _fetch(url, max_bytes, hosts, timeout, max_redirects, resolver, user_agent, ports), timeout + 5)
-    except asyncio.TimeoutError:
-        raise FetchError('timeout', 'the server took too long to respond')
+        real = await get(link, left)
+        if stream_url(real, link) is not None:
+            raise FetchError('loader', 'it answered with a loader again')
+    except FetchError as e:
+        if e.code in ('too_big', 'loader'):
+            raise
+        raise FetchError('loader', e.message) from e
+    return real
