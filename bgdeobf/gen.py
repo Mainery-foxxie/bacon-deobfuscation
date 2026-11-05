@@ -8,59 +8,137 @@ ARITH_OPS = {'ADDK': '+', 'SUBK': '-', 'MULK': '*', 'DIVK': '/', 'MODK': '%', 'P
 RESULT_FIRST = {'GETTABLEKS', 'GETTABLE', 'GETTABLEN', 'LENGTH', 'NOT', 'MINUS', 'OR', 'AND', 'ORK', 'ANDK'} \
     | set(ARITH_RR) | set(ARITH_K) | set(ARITH_RK)
 
-# Every global the Real executor defines, copied from its reference (https://docs.projectreal.gg/en, 24 categories,
-# 232 function pages): the functions, their aliases and the library tables (`crypt`, `json`, `Drawing`, ...).  Methods
-# such as `game:HttpGet` or `window:Button` are not globals and are not listed.
+# Every global any popular executor or executor-lineage defines: the Real reference, plus every
+# alias seen across Synapse / Krnl / Fluxus / Protosmasher / Wave / Solara style executors (see
+# --#region Helper types.txt and the executor global dump).  Methods such as `game:HttpGet` or
+# `window:Button` are not globals and are not listed.  `set()` dedupes, so overlapping aliases are fine.
 EXECUTOR_GLOBALS = set('''
     cache cloneref compareinstances
-    crypt base64_decode base64_encode lz4compress lz4decompress
-    appendfile delfile delfolder getcustomasset isfile isfolder listfiles loadfile makefolder openfiledialog
-    openfilesdialog openfolderdialog readfile savefiledialog writefile
-    json
-    rconsoleclear rconsolecreate rconsoledestroy rconsoleerr rconsolehide rconsoleinfo rconsoleinput rconsolename
-    rconsoleprint rconsoleshow rconsolewarn
-    Drawing cleardrawcache getrenderproperty isrenderobj setrenderproperty
-    imgui
-    isrbxactive keyclick keypress keyrelease mouse1click mouse1press mouse1release mouse2click mouse2press
-    mouse2release mousemoveabs mousemoverel mousescroll
-    fireclickdetector fireproximityprompt firetouchinterest getcallbackvalue gethui getinstances getnilinstances
-    isnetworkowner
-    gethiddenproperty isscriptable sethiddenproperty setscriptable
-    decompile dumpstring getcallingscript getinstancesbyclass getinstancesofclass getloadedmodules getmenv
-    getreferencedby getrunningscripts getscriptbytecode getscriptclosure getscripthash getscripts getscriptthread
-    getsenv loadstring
-    cansignalreplicate firesignal getconnections getsignalarguments getsignalargumentsinfo getsignalwhitelist
-    replicatesignal
+
+    crypt base64 base64_decode base64_encode base64decode base64encode
+    lz4compress lz4decompress zstdcompress zstddecompress json
+
+    appendfile delfile delfolder deletefile deletefolder dofile getcustomasset getsynasset writecustomasset
+    isfile isfolder listfiles loadfile makefolder readfile writefile
+    openfiledialog openfilesdialog openfolderdialog savefiledialog
+
+    rconsoleclear rconsolecreate rconsoledestroy rconsoleerr rconsolehide rconsoleinfo rconsoleinput
+    rconsolename rconsoleprint rconsoleshow rconsolesettitle rconsolewarn rconsoledebug
+    consoleclear consolecreate consoledestroy consoleerr consolehide consoleinfo consoleinput
+    consolename consoleprint consoleshow consolesettitle consolewarn consoledebug consoleerror
+
+    Drawing cleardrawcache getrenderproperty setrenderproperty getrenderobj setrenderobj isrenderobj
+    get_render_property set_render_property is_render_property isrenderproperty imgui
+
+    isrbxactive isgameactive iswindowactive
+    keyclick keypress keyrelease keytap
+    mouse1click mouse1press mouse1release mouse2click mouse2press mouse2release
+    mousemoveabs mousemoverel mousescroll
+
+    fireclickdetector fireproximityprompt firetouchinterest getcallbackvalue gethui
+    getinstances getnilinstances get_nil_instances get_instances getobjects
+    isnetworkowner testisnetworkowner setsimulationradius
+    gethiddenproperty isscriptable sethiddenproperty setscriptable getscriptable
+    protectinstance set_secure_instance setsecureinstance set_normal_instance setnormalinstance
+    is_secured_instance issecuredinstance createsecurefolder create_secure_folder
+
+    decompile dumpstring getcallingscript get_calling_script getscriptcaller getcaller
+    getinstancesbyclass getinstancesofclass getloadedmodules get_loaded_modules getmodules get_modules
+    getmenv getreferencedby getrunningscripts getscriptbytecode getscriptclosure getscripthash
+    getscripts get_scripts getscriptthread getscriptfunction get_script_function getsenv loadstring
+    islocalsourcecontainer
+
+    cansignalreplicate firesignal getconnections getsignalarguments getsignalargumentsinfo
+    getsignalwhitelist getallreplicatesignals replicatesignal restoreclosure restoresignal
+    hooksignal lockassetsignal issignalhooked isconnectionenabled enableconnection disableconnection
+
     WebSocket
-    create_comm_channel get_comm_channel getactorfromthread getactors getactorthreads getcurrentactor getdeletedactors
-    isparallel checkparallel run_on_actor runonactor run_on_thread runonthread
-    checkcaller clonefunction comparefunctions comparefunction getfunctionhash hookfunction hookmetamethod iscclosure
-    isexecutorclosure isfunctionhooked ishiddenstack isstackhidden islclosure isluaclosure isnewcclosure newcclosure
-    newlclosure restorefunction sethiddenstack setstackhidden
-    getconstant getconstants getinfo getproto getprotos getreg getstack getupvalue getupvalues isvalidlevel validlevel
-    setconstant setstack setupvalue
-    filtergc getgc get_gc_objects getgenv getrenv getscriptglobals gettenv getstateenv setclipboard toclipboard
-    setrbxclipboard
-    getmetafield getnamecallmethod get_namecall_method getrawmetatable hasmetafield hasmetatable isreadonly
-    makereadonly makewriteable setnamecallmethod set_namecall_method setrawmetatable setreadonly
+
+    create_comm_channel get_comm_channel getactorfromthread getactors getactorthreads
+    getcurrentactor getdeletedactors get_deleted_actors get_actors
+    get_actor_from_thread get_thread_actor getthreadactor getthreadscript
+    isparallel is_parallel checkparallel run_on_actor runonactor run_on_thread runonthread
+
+    getthreadidentity get_thread_identity setthreadidentity set_thread_identity
+    getthreadcontext get_thread_context setthreadcontext set_thread_context
+    getidentity setidentity getcontext setcontext
+
+    checkcaller clonefunction clonefunc comparefunctions comparefunction getfunctionhash
+    hookfunction hookfunc hookmetamethod iscclosure is_c_closure isexecutorclosure
+    is_executor_closure isfunctionhooked ishiddenstack isstackhidden islclosure is_l_closure
+    isluaclosure isnewcclosure newcclosure newlclosure restorefunction restorefunc
+    sethiddenstack setstackhidden checkclosure isourclosure is_our_closure isourcallstack
+    is_synapse_function issynapsefunction is_fluxus_function isfluxusfunction
+    is_fluxus_closure isfluxusclosure is_krnl_closure is_protosmasher_closure
+    protectfunction protectclosure detourfunction detour_function
+    replacefunction replacefunc replaceclosure
+
+    getconstant getconstants getinfo getproto getprotos getreg getregistry getstack
+    getupvalue getupvalues isvalidlevel validlevel setconstant setstack setupvalue
+    get_gc_objects filtergc filter_gc getgc debuginstance disassemble islineinfo
+
+    getgenv getrenv getrenvshared getrenvglobal getscriptglobals gettenv getstateenv
+    setclipboard toclipboard getclipboard fromclipboard setrbxclipboard
+
+    getmetafield getnamecallmethod get_namecall_method getrawmetatable hasmetafield
+    hasmetatable isreadonly makereadonly make_readonly iswritable iswriteable
+    makewritable make_writeable makewriteable setnamecallmethod set_namecall_method
+    setrawmetatable setreadonly make_writable
+
     getscriptfromthread getthreadidentity isourthread is_our_thread setthreadidentity
-    disassemble
-    clear_teleport_queue getexecutorname getexecutorversion getfflag getfflagtype getfpscap gethwid identifyexecutor
-    info messagebox queue_on_teleport request setfflag setfpscap
-    RakNet
-    Signal
+    setclosurecaps setclosureidentity
+
+    clear_teleport_queue clearteleportqueue queue_on_teleport queueonteleport
+
+    getexecutorname getexecutorversion getfflag getfflagtype getfpscap gethwid get_hwid
+    identifyexecutor info messagebox messageboxasync request http_request httpget
+    setfflag setfpscap
+
+    RakNet Signal signal actor bit http SCRIPTABLE_TABLE
+
     saveinstance
+
+    updateuiprocinfo printuiwarn printuierror printuiconsole erroruiconsole infouiconsole
+    warnuiconsole debuguiconsole printdebug debugprint
+
+    loginfo logdebug logwarn logerror logprint
 '''.split())
 
-ROBLOX_GLOBALS = {'game', 'workspace', 'script', 'math', 'string', 'table', 'Instance', 'Enum', 'task', 'print', 'warn', 'error',
-                  'pcall', 'xpcall', 'tostring', 'tonumber', 'type', 'typeof', 'pairs', 'ipairs', 'next', 'select', 'unpack',
-                  'require', 'wait', 'spawn', 'delay', 'tick', 'time', 'os', 'utf8', 'bit32', 'coroutine', 'debug', 'buffer',
-                  'Vector2', 'Vector3', 'CFrame', 'Color3', 'UDim2', 'UDim', 'BrickColor', 'TweenInfo', 'Ray', 'Rect',
-                  'Random', 'getgenv', 'getfenv', 'setfenv', 'loadstring', 'rawget', 'rawset', 'rawequal', 'setmetatable',
-                  'getmetatable', 'assert', 'shared', '_G', '_VERSION', 'Drawing', 'syn', 'request', 'http_request',
-                  'isfile', 'readfile', 'writefile', 'identifyexecutor', 'gethui', 'hookfunction', 'newcclosure',
-                  'clonefunction', 'getrawmetatable', 'setreadonly', 'islclosure', 'checkcaller', 'fireclickdetector',
-                  'firetouchinterest', 'getconnections', 'setclipboard', 'queue_on_teleport'} | EXECUTOR_GLOBALS
+ROBLOX_GLOBALS = {
+    # DataModel / primitives
+    'game', 'workspace', 'script',
+    'Instance', 'Enum', 'task',
+    # value constructors
+    'Vector2', 'Vector3', 'Vector2int16', 'Vector3int16',
+    'CFrame', 'Color3', 'BrickColor', 'UDim', 'UDim2',
+    'TweenInfo', 'Ray', 'Rect', 'Region3', 'Region3int16',
+    'NumberRange', 'NumberSequence', 'NumberSequenceKeypoint',
+    'ColorSequence', 'ColorSequenceKeypoint',
+    'PhysicalProperties', 'Random', 'DateTime', 'Font',
+    'OverlapParams', 'RaycastParams', 'PathWaypoint',
+    'Content', 'CatalogSearchParams', 'DockWidgetPluginGuiInfo',
+    'FloatCurveKey', 'RotationCurveKey',
+    # base libraries
+    'math', 'string', 'table', 'os', 'utf8', 'bit32', 'coroutine',
+    'debug', 'buffer', 'io',
+    # builtins
+    'print', 'warn', 'error', 'pcall', 'xpcall',
+    'tostring', 'tonumber', 'type', 'typeof', 'pairs', 'ipairs',
+    'next', 'select', 'unpack', 'rawget', 'rawset', 'rawequal',
+    'setmetatable', 'getmetatable', 'assert', 'require',
+    'wait', 'spawn', 'delay', 'yield', 'tick', 'time', 'elapsedTime',
+    'getfenv', 'setfenv', 'loadstring', 'newproxy',
+    'gcinfo', 'collectgarbage', 'version',
+    'shared', '_G', '_VERSION', 'PluginManager', 'settings', 'Debug',
+    # executor tables a normal Roblox script may already use
+    'Drawing', 'syn', 'request', 'http_request',
+    'isfile', 'readfile', 'writefile',
+    'identifyexecutor', 'gethui',
+    'hookfunction', 'newcclosure', 'clonefunction',
+    'getrawmetatable', 'setreadonly', 'islclosure', 'checkcaller',
+    'fireclickdetector', 'firetouchinterest', 'getconnections',
+    'setclipboard', 'queue_on_teleport',
+} | EXECUTOR_GLOBALS
 
 
 # services a script usually fetches through its own small wrapper (`local function getService(name) ... end`)
