@@ -1,408 +1,237 @@
-local net  = require("@lune/net")
-local task = require("@lune/task")
+"""Download a script from a URL for a chat user, without letting that user reach the host's own network.
 
-local M = {}
+- only http/https on ports 80/443, no user:password in the URL
+- every address a name resolves to must be a public one; the check lives in the resolver the connection really
+  uses, so a DNS answer cannot change between the check and the connect
+- redirects are followed by hand and every hop is checked again
+- hard limits on size (also after decompression) and time
+- no cookies, no proxy from the environment
+- a paste site that answers with its Roblox-only loader instead of the script (see paste_envelope.py) gets one more
+  request, for the script link written in the loader: same site, same checks, same limits, same headers"""
+import asyncio
+import ipaddress
+import re
+import socket
+import zlib
+from urllib.parse import urljoin, urlsplit
 
-M.user_agent    = "Delta/1.0"
-M.roblox_agent  = "Roblox/WinInet"
-M.max_bytes     = 8 * 1024 * 1024
-M.timeout       = 25
-M.max_redirects = 3
-M.ports         = { [80] = true, [443] = true }
+import aiohttp
+from aiohttp import abc as aiohttp_abc
 
-M.proxy    = "http://CnUvt9XpMADgyJq:IEm97oGXASdTlQv@156.232.90.75:44282"
-M.resolver = nil
+from .paste_envelope import stream_url
 
-local function fail(code, msg) error({ code = code, message = msg }, 0) end
+USER_AGENT = 'bgdeobf-bot/1.0 (script fetch)'
+URL_RE = re.compile(r'https?://[^\s<>"\'`)\]]+', re.I)
 
-local function url_split(u)
-    if type(u) ~= "string" then return nil end
-    local scheme, rest = u:match("^(%a[%w+.-]*)://(.*)$")
-    if not scheme then return nil end
-    scheme = scheme:lower()
-    local authority, tail = rest:match("^([^/?#]*)(.*)$")
-    local userinfo, hostport
-    local at = authority:match(".*()@")
-    if at then
-        userinfo = authority:sub(1, at - 1)
-        hostport = authority:sub(at + 1)
-    else
-        hostport = authority
-    end
-    local host, port
-    if hostport:sub(1, 1) == "[" then
-        host, port = hostport:match("^%[([^%]]+)%]:?(%d*)$")
-        if not host then return nil end
-    else
-        host, port = hostport:match("^([^:]*):?(%d*)$")
-        if not host then return nil end
-    end
-    if port == "" then port = nil end
-    local path, query, fragment = tail, nil, nil
-    local h = path:find("#", 1, true)
-    if h then fragment = path:sub(h + 1); path = path:sub(1, h - 1) end
-    local q = path:find("?", 1, true)
-    if q then query = path:sub(q + 1); path = path:sub(1, q - 1) end
-    if path == "" then path = "/" end
-    return {
-        scheme    = scheme,
-        userinfo  = userinfo,
-        authority = hostport,
-        host      = host and host:lower():gsub("%.$", "") or nil,
-        port      = port and tonumber(port) or nil,
-        path      = path,
-        query     = query,
-        fragment  = fragment,
-    }
-end
 
-local function parse_ipv4(s)
-    local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
-    if not a then return nil end
-    a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
-    if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
-    return { a, b, c, d }
-end
+class FetchError(Exception):
+    """code: bad_url | blocked | http | html | too_big | empty | timeout | net | loader
+    (loader: the site gave its Roblox-only loader and the script link inside it did not give the script)"""
 
-local function parse_ipv6(s)
-    s = s:gsub("%%.*$", "")
-    if not s:find(":", 1, true) then return nil end
-    local dc = s:find("::", 1, true)
-    local left, right
-    if dc then
-        left  = s:sub(1, dc - 1)
-        right = s:sub(dc + 2)
-    else
-        left, right = s, ""
-    end
-    local function groups(part)
-        local out = {}
-        if part == "" then return out end
-        for g in part:gmatch("[^:]+") do
-            if g:find(".", 1, true) then
-                local v4 = parse_ipv4(g)
-                if not v4 then return nil end
-                out[#out + 1] = v4[1] * 256 + v4[2]
-                out[#out + 1] = v4[3] * 256 + v4[4]
-            else
-                local n = tonumber(g, 16)
-                if not n or n > 0xffff then return nil end
-                out[#out + 1] = n
-            end
-        end
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+        self.message = message
+
+
+class BlockedAddress(OSError):
+    pass
+
+
+_BLOCKED4 = [ipaddress.ip_network(n) for n in (
+    '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24',
+    '192.0.2.0/24', '192.88.99.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24',
+    '224.0.0.0/4', '240.0.0.0/4')]
+_BLOCKED6 = [ipaddress.ip_network(n) for n in (
+    '::/128', '::1/128', '::ffff:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001:db8::/32',
+    '2002::/16', 'fc00::/7', 'fe80::/10', 'fec0::/10', 'ff00::/8')]
+
+
+def is_public(ip):
+    """True only for addresses that belong to the public internet"""
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return is_public(ip.ipv4_mapped)
+    for net in (_BLOCKED4 if ip.version == 4 else _BLOCKED6):
+        if ip in net:
+            return False
+    return bool(ip.is_global)
+
+
+class SafeResolver(aiohttp_abc.AbstractResolver):
+    """resolves names and refuses (the whole name) when any answer is not a public address"""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        loop = asyncio.get_running_loop()
+        try:
+            infos = await loop.getaddrinfo(host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            raise OSError('cannot resolve %s' % host)
+        out = []
+        for fam, _t, proto, _c, sa in infos:
+            ip = ipaddress.ip_address(sa[0].split('%')[0])
+            if not is_public(ip):
+                raise BlockedAddress('%s resolves to a non-public address' % host)
+            out.append({'hostname': host, 'host': sa[0], 'port': port, 'family': fam, 'proto': proto,
+                        'flags': socket.AI_NUMERICHOST})
+        if not out:
+            raise OSError('no address for %s' % host)
         return out
-    end
-    local l, r = groups(left), groups(right)
-    if not l or not r then return nil end
-    local words = {}
-    if dc then
-        if #l + #r > 7 then return nil end
-        for i = 1, #l do words[#words + 1] = l[i] end
-        for _ = 1, 8 - #l - #r do words[#words + 1] = 0 end
-        for i = 1, #r do words[#words + 1] = r[i] end
-    else
-        if #l ~= 8 then return nil end
-        for i = 1, #l do words[#words + 1] = l[i] end
-    end
-    local bytes = {}
-    for i = 1, #words do
-        local w = words[i]
-        bytes[#bytes + 1] = math.floor(w / 256)
-        bytes[#bytes + 1] = w % 256
-    end
-    return bytes
-end
 
-local function parse_cidr(s)
-    local ip, p = s:match("^(.-)/(%d+)$")
-    if not ip then return nil end
-    local b = parse_ipv4(ip) or parse_ipv6(ip)
-    if not b then return nil end
-    return { bytes = b, prefix = tonumber(p) }
-end
+    async def close(self):
+        return None
 
-local function in_net(addr, netw)
-    local n = netw.prefix
-    local full, rem = math.floor(n / 8), n % 8
-    for i = 1, full do
-        if addr[i] ~= netw.bytes[i] then return false end
-    end
-    if rem > 0 then
-        local mask = bit32.lshift(0xff, 8 - rem)
-        if bit32.band(addr[full + 1] or 0, mask) ~= bit32.band(netw.bytes[full + 1] or 0, mask) then
-            return false
-        end
-    end
-    return true
-end
 
-local BLOCKED4, BLOCKED6 = {}, {}
-for _, s in ipairs({
-    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
-    "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
-    "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-}) do BLOCKED4[#BLOCKED4 + 1] = parse_cidr(s) end
+def extract_url(text):
+    """first http(s) URL in a chat message; also finds it inside loadstring(game:HttpGet("..."))()"""
+    m = URL_RE.search(text or '')
+    if not m:
+        return None
+    return m.group(0).rstrip('.,;:!?')
 
-for _, s in ipairs({
-    "::/128", "::1/128", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64",
-    "2001::/23", "2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10",
-    "fec0::/10", "ff00::/8",
-}) do BLOCKED6[#BLOCKED6 + 1] = parse_cidr(s) end
 
-local function is_public(bytes)
-    if #bytes == 4 then
-        for i = 1, #BLOCKED4 do
-            if in_net(bytes, BLOCKED4[i]) then return false end
-        end
-        return true
-    end
-    local mapped = true
-    for i = 1, 10 do
-        if bytes[i] ~= 0 then mapped = false; break end
-    end
-    if mapped and bytes[11] == 0xff and bytes[12] == 0xff then
-        return is_public({ bytes[13], bytes[14], bytes[15], bytes[16] })
-    end
-    for i = 1, #BLOCKED6 do
-        if in_net(bytes, BLOCKED6[i]) then return false end
-    end
-    return true
-end
+def normalize_url(url):
+    """turn the page address of a few common hosts into the raw address"""
+    sp = urlsplit(url.strip())
+    host = (sp.hostname or '').lower()
+    parts = [p for p in sp.path.split('/') if p]
+    if host in ('github.com', 'www.github.com') and len(parts) >= 5 and parts[2] == 'blob':
+        user, repo, _blob, ref = parts[:4]
+        return 'https://raw.githubusercontent.com/%s/%s/%s/%s' % (user, repo, ref, '/'.join(parts[4:]))
+    if host in ('pastebin.com', 'www.pastebin.com') and len(parts) == 1 and re.fullmatch(r'[A-Za-z0-9]{6,12}', parts[0]):
+        return 'https://pastebin.com/raw/' + parts[0]
+    if host == 'gist.github.com' and len(parts) == 2 and re.fullmatch(r'[0-9a-fA-F]{8,40}', parts[1]):
+        return 'https://gist.githubusercontent.com/%s/%s/raw' % (parts[0], parts[1])
+    return url.strip()
 
-local function check_url(url)
-    local sp = url_split(url)
-    if not sp then fail("bad_url", "invalid URL") end
-    if sp.scheme ~= "http" and sp.scheme ~= "https" then
-        fail("bad_url", "only http:// or https:// is allowed")
-    end
-    if sp.userinfo then fail("bad_url", "the URL must not contain user:password") end
-    local host = sp.host
-    if not host or host == "" or #host > 253 then fail("bad_url", "invalid URL") end
-    if sp.port and not M.ports[sp.port] then
-        fail("bad_url", "only port 80 or 443 is allowed")
-    end
-    local ip = parse_ipv4(host) or parse_ipv6(host)
-    if ip and not is_public(ip) then
-        fail("blocked", "that address is not a public address")
-    end
+
+def url_stem(url):
+    """a file name stem for the result: last path segment of the URL"""
+    seg = urlsplit(url).path.rstrip('/').rsplit('/', 1)[-1]
+    seg = re.sub(r'\.(lua|luau|txt)$', '', seg, flags=re.I)
+    return seg or 'script'
+
+
+def check_url(url, hosts=None, ports=(80, 443)):
+    """validate one URL (initial or redirect target); returns the SplitResult"""
+    try:
+        sp = urlsplit(url.strip())
+        port = sp.port
+    except ValueError:
+        raise FetchError('bad_url', 'invalid URL')
+    if sp.scheme.lower() not in ('http', 'https'):
+        raise FetchError('bad_url', 'only http:// or https:// is allowed')
+    if sp.username or sp.password or '@' in sp.netloc:
+        raise FetchError('bad_url', 'the URL must not contain user:password')
+    host = (sp.hostname or '').rstrip('.').lower()
+    if not host or len(host) > 253:
+        raise FetchError('bad_url', 'invalid URL')
+    if port is not None and port not in ports:
+        raise FetchError('bad_url', 'only port 80 or 443 is allowed')
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and not is_public(ip):
+        raise FetchError('blocked', 'that address is not a public address')
+    if hosts and not any(host == h or host.endswith('.' + h) for h in hosts):
+        raise FetchError('blocked', 'that host is not on the allowed list')
     return sp
-end
 
-local function check_dns(sp)
-    if not M.resolver then return end
-    if parse_ipv4(sp.host) or parse_ipv6(sp.host) then return end
-    local list = M.resolver(sp.host)
-    if not list or #list == 0 then fail("net", "cannot resolve " .. sp.host) end
-    for i = 1, #list do
-        local b = parse_ipv4(list[i]) or parse_ipv6(list[i])
-        if not b then fail("net", "resolver returned a bad address") end
-        if not is_public(b) then
-            fail("blocked", sp.host .. " resolves to a non-public address")
-        end
-    end
-end
 
-local function path_parts(path)
-    local out = {}
-    for seg in path:gmatch("[^/]+") do out[#out + 1] = seg end
+def _gunzip(data, max_bytes, encoding):
+    wbits = 16 + zlib.MAX_WBITS if encoding == 'gzip' else zlib.MAX_WBITS
+    d = zlib.decompressobj(wbits)
+    try:
+        out = d.decompress(data, max_bytes + 1)
+    except zlib.error:
+        raise FetchError('http', 'the compressed content is corrupt')
+    if len(out) > max_bytes:
+        raise FetchError('too_big', 'the decompressed content exceeds the limit')
     return out
-end
 
-function M.normalize_url(url)
-    local sp = url_split(url)
-    if not sp then return url end
-    local host, parts = sp.host, path_parts(sp.path)
-    if (host == "github.com" or host == "www.github.com") and #parts >= 5 and parts[3] == "blob" then
-        local rest = {}
-        for i = 5, #parts do rest[#rest + 1] = parts[i] end
-        return ("https://raw.githubusercontent.com/%s/%s/%s/%s")
-            :format(parts[1], parts[2], parts[4], table.concat(rest, "/"))
-    end
-    if (host == "pastebin.com" or host == "www.pastebin.com") and #parts == 1
-        and parts[1]:match("^[A-Za-z0-9]+$") and #parts[1] >= 6 and #parts[1] <= 12 then
-        return "https://pastebin.com/raw/" .. parts[1]
-    end
-    if host == "gist.github.com" and #parts == 2
-        and parts[2]:match("^[0-9a-fA-F]+$") and #parts[2] >= 8 and #parts[2] <= 40 then
-        return ("https://gist.githubusercontent.com/%s/%s/raw"):format(parts[1], parts[2])
-    end
-    return url
-end
 
-function M.extract_url(text)
-    if type(text) ~= "string" then return nil end
-    local m = text:match("https?://[^%s<>\"'`%)%]]+")
-    if not m then return nil end
-    return (m:gsub("[%.,;:!?]+$", ""))
-end
+async def _fetch(url, max_bytes, hosts, timeout, max_redirects, resolver, user_agent, ports):
+    conn = aiohttp.TCPConnector(resolver=resolver or SafeResolver(), use_dns_cache=False, force_close=True, limit=1)
+    cfg = aiohttp.ClientTimeout(total=timeout, connect=10, sock_read=15)
+    headers = {'User-Agent': user_agent, 'Accept': 'text/plain, */*;q=0.5', 'Accept-Encoding': 'gzip, identity'}
+    async with aiohttp.ClientSession(connector=conn, timeout=cfg, headers=headers, cookie_jar=aiohttp.DummyCookieJar(),
+                                     trust_env=False, auto_decompress=False) as session:
+        cur = url
+        for _hop in range(max_redirects + 1):
+            check_url(cur, hosts, ports)
+            try:
+                async with session.get(cur, allow_redirects=False) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get('Location')
+                        if not loc:
+                            raise FetchError('http', 'redirect without a destination')
+                        cur = urljoin(cur, loc)
+                        continue
+                    if resp.status != 200:
+                        raise FetchError('http', 'the server answered HTTP %d' % resp.status)
+                    if resp.content_length is not None and resp.content_length > max_bytes:
+                        raise FetchError('too_big', 'the file exceeds the limit')
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(65536):
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            raise FetchError('too_big', 'the file exceeds the limit')
+                    enc = (resp.headers.get('Content-Encoding') or 'identity').strip().lower()
+                    ctype = (resp.headers.get('Content-Type') or '').lower()
+            except FetchError:
+                raise
+            except asyncio.TimeoutError:
+                raise FetchError('timeout', 'the server took too long to respond')
+            except aiohttp.ClientConnectorError as e:
+                if isinstance(getattr(e, 'os_error', None), BlockedAddress):
+                    raise FetchError('blocked', 'that address is not a public address')
+                raise FetchError('net', 'could not connect to that server')
+            except aiohttp.InvalidURL:
+                raise FetchError('bad_url', 'invalid URL')
+            except (aiohttp.ClientError, OSError):
+                raise FetchError('net', 'the connection to the server was lost')
+            data = bytes(buf)
+            if enc in ('gzip', 'x-gzip', 'deflate'):
+                data = _gunzip(data, max_bytes, 'gzip' if 'gzip' in enc else 'deflate')
+            elif enc != 'identity':
+                raise FetchError('http', 'the server used an unsupported compression (%s)' % enc[:20])
+            if not data.strip():
+                raise FetchError('empty', 'the content is empty')
+            head = data[:300].lstrip()
+            if head[:1] == b'<' and ('html' in ctype or head[:15].lower().startswith((b'<!doctype html', b'<html'))):
+                raise FetchError('html', 'that is a web page, not a raw file')
+            return data
+    raise FetchError('http', 'too many redirects')
 
-function M.url_stem(url)
-    local sp = url_split(url)
-    local path = sp and sp.path or url
-    local seg = path:gsub("/+$", ""):match("([^/]*)$") or ""
-    seg = seg:gsub("%.[Ll][Uu][Aa][Uu]?$", ""):gsub("%.[Tt][Xx][Tt]$", "")
-    return seg ~= "" and seg or "script"
-end
 
-function M.urljoin(base, ref)
-    if ref:match("^%a[%w+.-]*://") then return ref end
-    local b = url_split(base)
-    if not b then return ref end
-    if ref:sub(1, 2) == "//" then return b.scheme .. ":" .. ref end
-    if ref:sub(1, 1) == "/" then return ("%s://%s%s"):format(b.scheme, b.authority, ref) end
-    if ref:sub(1, 1) == "?" then return ("%s://%s%s?%s"):format(b.scheme, b.authority, b.path, ref:sub(2)) end
-    if ref:sub(1, 1) == "#" then return ("%s://%s%s"):format(b.scheme, b.authority, b.path) end
-    local dir = b.path:gsub("[^/]*$", "")
-    return ("%s://%s%s%s"):format(b.scheme, b.authority, dir, ref)
-end
+async def fetch(url, max_bytes, hosts=None, timeout=25, max_redirects=3, resolver=None, user_agent=USER_AGENT,
+                ports=(80, 443)):
+    """download `url` (already extracted from the message); returns bytes or raises FetchError.
 
-local HEX = "0123456789abcdef"
-local function random_hex(n)
-    local out = {}
-    for i = 1, n do
-        local k = math.random(1, 16)
-        out[i] = HEX:sub(k, k)
-    end
-    return table.concat(out)
-end
+    When the answer is a paste site's Roblox-only loader, the script link written in it is requested as well (one step
+    only, nothing is run) and that content is returned instead"""
+    url = normalize_url(url)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
 
-local function build_headers(url, user_agent)
-    local h = {
-        ["User-Agent"]      = user_agent or M.user_agent,
-        ["Accept"]          = "text/plain, */*;q=0.5",
-        ["Accept-Encoding"] = "gzip, identity",
-    }
-    if url:match("^https://[%w_%-]+%.roblox%.com/") or url:match("^https://roblox%.com/") then
-        h["User-Agent"]       = M.roblox_agent
-        h["traceparent"]      = "00-" .. random_hex(49) .. "-00"
-        h["Roblox-Id"]        = random_hex(16)
-        h["Krnl-Fingerprint"] = random_hex(16)
-    end
-    return h
-end
+    async def get(target, budget):
+        try:
+            return await asyncio.wait_for(
+                _fetch(target, max_bytes, hosts, budget, max_redirects, resolver, user_agent, ports), budget + 5)
+        except asyncio.TimeoutError:
+            raise FetchError('timeout', 'the server took too long to respond')
 
-local function get_header(headers, name)
-    if not headers then return nil end
-    local n = name:lower()
-    for k, v in pairs(headers) do
-        if type(k) == "string" and k:lower() == n then
-            if type(v) == "table" then return v[1] end
-            return v
-        end
-    end
-    return nil
-end
-
-local function request_with_timeout(url, user_agent, seconds)
-    local state = { done = false, ok = false, res = nil, err = nil }
-    task.spawn(function()
-        local ok, res = pcall(function()
-            return net.request({
-                url     = url,
-                method  = "GET",
-                headers = build_headers(url, user_agent),
-            })
-        end)
-        state.done = true
-        state.ok   = ok
-        state.res  = res
-        if not ok then state.err = res end
-    end)
-    local ticks = math.max(1, math.floor(seconds / 0.05))
-    for _ = 1, ticks do
-        if state.done then break end
-        task.wait(0.05)
-    end
-    if not state.done then fail("timeout", "the server took too long to respond") end
-    if not state.ok then fail("net", tostring(state.err)) end
-    return state.res
-end
-
-local function fetch_url(url, opts)
-    opts = opts or {}
-    local max_bytes     = opts.max_bytes     or M.max_bytes
-    local timeout       = opts.timeout       or M.timeout
-    local max_redirects = opts.max_redirects or M.max_redirects
-    local user_agent    = opts.user_agent
-
-    local cur = url
-    for _ = 0, max_redirects do
-        local sp = check_url(cur)
-        check_dns(sp)
-        local resp = request_with_timeout(cur, user_agent, timeout)
-        local status = resp.statusCode or 0
-        if status >= 300 and status <= 399 then
-            local loc = get_header(resp.headers, "location")
-            if not loc then fail("http", "redirect without a destination") end
-            cur = M.urljoin(cur, loc)
-        else
-            if status ~= 200 then
-                fail("http", ("the server answered HTTP %d"):format(status))
-            end
-            local body = resp.body or ""
-            local cl = get_header(resp.headers, "content-length")
-            if cl then
-                local n = tonumber(cl)
-                if n and n > max_bytes then fail("too_big", "the file exceeds the limit") end
-            end
-            if #body > max_bytes then fail("too_big", "the file exceeds the limit") end
-            if not body:find("%S") then fail("empty", "the content is empty") end
-            local ctype = (get_header(resp.headers, "content-type") or ""):lower()
-            local head  = body:sub(1, 300):gsub("^%s+", "")
-            local lower = head:lower()
-            if head:sub(1, 1) == "<"
-               and (ctype:find("html", 1, true)
-                    or lower:sub(1, 15) == "<!doctype html"
-                    or lower:sub(1, 5) == "<html") then
-                fail("html", "that is a web page, not a raw file")
-            end
-            return body
-        end
-    end
-    fail("http", "too many redirects")
-end
-
-local function find_loader_link(body, base)
-    if #body > 16384 then return nil end
-    local patterns = {
-        "game:HttpGet%s*%(?%s*[\"']([^\"']+)[\"']",
-        "game:HttpGetAsync%s*%(?%s*[\"']([^\"']+)[\"']",
-        "[Ll]oadstring%s*%(%s*game:HttpGet%s*%(?%s*[\"']([^\"']+)[\"']",
-    }
-    for i = 1, #patterns do
-        local u = body:match(patterns[i])
-        if u and u:match("^https?://") then return M.urljoin(base, u) end
-    end
-    for u in body:gmatch("[\"'](https?://[^\"']+)[\"']") do
-        if u:match("%.lua") or u:match("%.luau") or u:match("%.txt") or u:match("/raw/") then
-            return M.urljoin(base, u)
-        end
-    end
-    return nil
-end
-
-function M.get(url, opts)
-    opts = opts or {}
-    url = M.normalize_url(url)
-    local body = fetch_url(url, opts)
-
-    if opts.detect_loader == false then
-        return body
-    end
-
-    local link = find_loader_link(body, url)
-    if not link then return body end
-
-    local ok, inner = pcall(fetch_url, link, opts)
-    if not ok then
-        local e = inner
-        if type(e) == "table" and (e.code == "too_big" or e.code == "loader") then error(e, 0) end
-        fail("loader", (type(e) == "table" and e.message) or tostring(e))
-    end
-    return inner
-end
-
-M.get_text = M.get
-
-return M
+    data = await get(url, timeout)
+    link = stream_url(data, url)
+    if link is None:
+        return data
+    left = min(timeout, max(5, timeout - (loop.time() - started)))      # the second request shares the time budget
+    try:
+        real = await get(link, left)
+        if stream_url(real, link) is not None:
+            raise FetchError('loader', 'it answered with a loader again')
+    except FetchError as e:
+        if e.code in ('too_big', 'loader'):
+            raise
+        raise FetchError('loader', e.message) from e
+    return real
