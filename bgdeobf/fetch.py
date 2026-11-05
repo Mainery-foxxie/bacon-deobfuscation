@@ -3,7 +3,7 @@ local task = require("@lune/task")
 
 local M = {}
 
-M.user_agent    = "bgdeobf-bot/1.0 (script fetch)"
+M.user_agent    = "Delta/1.0"
 M.roblox_agent  = "Roblox/WinInet"
 M.max_bytes     = 8 * 1024 * 1024
 M.timeout       = 25
