@@ -269,7 +269,7 @@ def run_batch(items, clock, timeout, mem_mb):
     parts.append('print(table.concat(W, "\\n"))\n')
     out = run_luau(''.join(parts), timeout=timeout, mem_mb=mem_mb).decode('latin1')
     res = {}
-    for line in out.split('\n'):
+    for line in out.replace('\r', '').split('\n'):          # the Windows build of Luau ends its lines with \r\n
         f = line.split('\t')
         if len(f) >= 2 and f[0].isdigit():
             res[int(f[0])] = '\t'.join(f[1:])
