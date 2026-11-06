@@ -246,6 +246,22 @@ same site). The bot follows that one step: it asks the same site for the link wr
 headers and the same checks as any download, and deobfuscates what comes back. It never runs the loader and never
 pretends to be Roblox. If the site gives the script only to a real Roblox client, or the signed link has run out (it is
 tied to one IP address and lasts a few minutes), the bot says so and you attach the script file instead.
+
+If you have an executor, you can get that file yourself: run this once in Roblox, then run the loader normally (its own,
+real `HttpGet` + `loadstring` happens). The hook saves the text that was about to run to `dumped_script.lua` (and to your
+clipboard) and then runs it unchanged. Attach `dumped_script.lua` to `!uwu`. This is not part of the bot: it only
+captures what your own client was about to run.
+```lua
+local old_loadstring
+old_loadstring = hookfunction(loadstring, function(source, chunkname)
+    if type(source) == "string" and #source > 50 then
+        pcall(function() writefile("dumped_script.lua", source) end)
+        pcall(function() setclipboard(source) end)
+    end
+    return old_loadstring(source, chunkname)
+end)
+```
+
 `!uwu` and `!moonveil` reply in the channel, so everyone there can see the result; use a slash command if you want it private.
 
 While a job runs the bot shows a **progress card**: one message with the steps (validating and downloading a URL, detecting

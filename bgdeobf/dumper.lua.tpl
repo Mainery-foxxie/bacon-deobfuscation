@@ -41,8 +41,14 @@ function __DUMPER()
   end
   for idx = 0, n - 1 do
     local P = protos[idx]
+    -- newer builds compile some protos to a native Lua function (aotHandler) that the frame runs before the point
+    -- where the dump returns; on its own it would index upvalues that do not exist.  The records are all we want, so
+    -- the handler is set aside while the frame is made and put back afterwards.
+    local aot = P.aotHandler
+    P.aotHandler = nil
     local f = mk(P, {})
     f(__DUMP)
+    P.aotHandler = aot
     emit(string.format("P %d np=%d va=%d nup=%d ms=%d entry=%d df=%d vf=%d nrec=%d rs=%d", idx, P.numParams, P.isVararg and 1 or 0,
       P.numUpvalues, P.maxStack, P.entry, P.dispatchFormat, P.vmFamily, P.instructionCount, P.regShift or 0))
     local kids = {}

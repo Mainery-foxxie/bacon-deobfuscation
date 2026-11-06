@@ -251,11 +251,11 @@ def _fmt_clock(v):
     return repr(float(v))
 
 
-def _vm_text(text):
-    """The sandbox hands the program to the VM one byte per character (latin-1), but the script is UTF-8: an accented
-    letter would reach the VM as the single code point U+00E9 instead of its two UTF-8 bytes, and an emoji (above
-    U+00FF) would make the encode fail.  Rewriting every character as the latin-1 characters of its UTF-8 bytes makes
-    the VM read exactly the bytes the source has."""
+def _byte_text(text):
+    """The text as the cleaner works on it: the UTF-8 bytes of `text`, one character per byte (latin-1).  luau-ast reports
+    positions in bytes, and both luau-ast and the sandbox are given the text as latin-1 bytes: an accented letter would
+    reach the VM as the single code point U+00E9 instead of its two UTF-8 bytes, and an emoji (above U+00FF) would make
+    the encode fail.  In this form every character is one byte, so a position is an index into the text."""
     return text.encode('utf-8').decode('latin1')
 
 
@@ -268,7 +268,7 @@ def run_batch(items, clock, timeout, mem_mb):
         else:
             parts.append('put(%d, pcall(function() return %s end))\n' % (idx, text))
     parts.append('print(table.concat(W, "\\n"))\n')
-    out = run_luau(_vm_text(''.join(parts)), timeout=timeout, mem_mb=mem_mb).decode('latin1')
+    out = run_luau(''.join(parts), timeout=timeout, mem_mb=mem_mb).decode('latin1')
     res = {}
     for line in out.replace('\r', '').split('\n'):
         f = line.split('\t')
@@ -353,10 +353,10 @@ class Evaluator(object):
 
 
 def literal_text(res):
-    """source text of a decoded result"""
+    """source text of a decoded result (in the form the cleaner works on, see `_byte_text`)"""
     kind, v = res
     if kind == 'S':
-        return lua_str(v)
+        return _byte_text(lua_str(v))
     if kind == 'N':
         if v == int(v) and abs(v) < 1e15:
             return str(int(v))
@@ -836,7 +836,7 @@ def plain_statement(line):
                 i += 1
             elif c == quote:
                 quote = None
-        elif c in '"\' ':
+        elif c in '"\'':
             quote = c
         elif c in '([{':
             depth += 1
@@ -873,6 +873,15 @@ def indent_of(line):
 
 
 def clean_source(text, timeout=20, mem_mb=512, budget=90):
-    """-> (cleaned text, stats).  Raises CleanError / LuauError when the text cannot be processed."""
-    c = Cleaner(text, timeout, mem_mb, budget)
-    return c.run()
+    """-> (cleaned text, stats).  Raises CleanError / LuauError when the text cannot be processed.
+
+    `text` is ordinary text, as the decompiler writes it (a string that is valid UTF-8 appears as its characters).  The
+    work is done on its UTF-8 bytes, one character per byte (`_byte_text`), and the result is turned back into text.
+    Without that, a character beyond U+00FF (an emoji in a label) made the whole cleanup fail, and a string like `"é"`
+    was run as one byte instead of two."""
+    c = Cleaner(_byte_text(text), timeout, mem_mb, budget)
+    out, stats = c.run()
+    try:
+        return out.encode('latin1').decode('utf-8'), stats
+    except UnicodeDecodeError:
+        raise CleanError('the cleaned text is not valid UTF-8')

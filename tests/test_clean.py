@@ -259,3 +259,41 @@ def test_windows_line_endings_from_luau_do_not_change_the_result(monkeypatch):
     got, got_stats = clean_source(src)
     assert got == want
     assert got_stats == want_stats
+
+
+# ---- text that is not plain ASCII.  The decompiler writes a string that is valid UTF-8 as the characters themselves
+# ("🎁 gift"), but luau-ast reports positions in bytes and the sandbox reads bytes, so the cleanup has to work on the bytes
+# of the text and hand text back.
+
+def test_a_character_beyond_latin1_in_a_string_does_not_stop_the_cleanup():
+    """a script with an emoji in a label lost its whole cleanup ('latin-1 codec can't encode character')"""
+    src = 'local gift = "\U0001F381 Auto Gift"\nprint(gift, bit32.bxor(5, 3))\n'
+    out, stats = cleaned(src)
+    assert out == 'local gift = "\U0001F381 Auto Gift"\nprint(gift, 6)\n'
+    assert stats['numbers'] == 1
+
+
+def test_positions_after_characters_of_several_bytes_on_the_same_line_are_right():
+    src = 'print("é € \U0001F381", bit32.bxor(5, 3), "中", bit32.bxor(6, 3))\n'
+    out, stats = cleaned(src)
+    assert out == 'print("é € \U0001F381", 6, "中", 5)\n'
+    assert stats['numbers'] == 2
+
+
+def test_a_string_is_run_as_its_utf8_bytes():
+    """`é` is two bytes in the script, so the length is 3 with the digit after it; reading it as one byte gave 2 and
+    changed what the script does"""
+    out, _ = cleaned('local n = #("é" .. tostring(bit32.bxor(1, 1)))\n')
+    assert out == 'local n = 3\n'
+
+
+def test_a_decrypted_string_with_an_emoji_is_written_as_the_emoji():
+    src = 'local s = buffer.tostring(buffer.fromstring("\\240\\159\\142\\129 hi"))\nprint(s, bit32.bxor(5, 3))\n'
+    out, stats = cleaned(src)
+    assert out == 'local s = "\U0001F381 hi"\nprint(s, 6)\n'
+    assert stats['strings'] == 1 and stats['numbers'] == 1
+
+
+def test_a_decrypted_string_that_is_not_text_stays_escaped():
+    out, _ = cleaned('local s = buffer.tostring(buffer.fromstring("\\255\\254 ok"))\n')
+    assert out == 'local s = "\\255\\254 ok"\n'

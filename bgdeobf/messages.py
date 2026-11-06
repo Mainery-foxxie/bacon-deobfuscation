@@ -185,7 +185,7 @@ def explain_fetch(code, detail=None, max_mb=3):
         return ('That URL gives a loader that only runs inside Roblox (the paste host\'s "Secure Runtime Envelope"), '
                 'not the script itself. I asked for the script link written in it, but %s. That link is signed for one '
                 'IP address and runs out within minutes, and the host may give it only to a real Roblox client. '
-                'Attach the script file to the command instead.' % why)
+                'Attach the script file to the command instead (the README shows how to dump it yourself from an executor).' % why)
     head = {'bad_url': "That URL can't be used", 'blocked': 'That URL was rejected', 'http': 'Failed to fetch the URL',
             'net': "Couldn't fetch that URL"}.get(code, 'Failed to fetch the URL')
     return '%s: %s.' % (head, (detail or '').rstrip('.')) if detail else head + '.'
