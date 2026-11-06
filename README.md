@@ -240,6 +240,12 @@ How to use it:
 
 GitHub `blob` links, normal Pastebin links and Gists are converted to their raw form automatically. Links to web pages
 (HTML) are rejected with a hint.
+Some paste sites answer a raw link with a short Roblox-only loader instead of the script (the "Bacon Guard Secure Runtime
+Envelope": about 1 KB of Lua that checks it runs inside Roblox, then `game:HttpGet`s the script from a signed link on the
+same site). The bot follows that one step: it asks the same site for the link written in the loader, with the same
+headers and the same checks as any download, and deobfuscates what comes back. It never runs the loader and never
+pretends to be Roblox. If the site gives the script only to a real Roblox client, or the signed link has run out (it is
+tied to one IP address and lasts a few minutes), the bot says so and you attach the script file instead.
 `!uwu` and `!moonveil` reply in the channel, so everyone there can see the result; use a slash command if you want it private.
 
 While a job runs the bot shows a **progress card**: one message with the steps (validating and downloading a URL, detecting
@@ -271,7 +277,9 @@ One user can only have one job running at a time.
   port 80/443, no `user:password`, **every** IP address returned by DNS must be public (loopback, private networks,
   link-local/cloud metadata, local IPv6 and IPv4 addresses wrapped in IPv6 are rejected; the check lives in the resolver
   the connection uses, so there is no DNS-rebinding gap), every redirect is checked again (max 3), size limits (also
-  after decompression) and time limits apply, no cookies are sent, and proxies from the environment are not used.
+  after decompression) and time limits apply, no cookies are sent, and proxies from the environment are not used. The
+  one extra request for a paste site's loader link (above) must be on the same site (scheme, host and port) as the
+  link you gave, is never followed a second time, and goes through all of these checks too.
 - `trace`, `sandbox` and the MoonVeil reconstruction (`!moonveil`, or a MoonVeil banner) run the script's code (in a fake Roblox,
   in a separate limited process; see *Safety* above). Anyone who can use the bot can use them, so restrict the bot with `ALLOWED_GUILDS` / `ALLOWED_USERS` when it is not private, and
   run it where it has no network access to your other machines.
@@ -343,16 +351,18 @@ set `BGDEOBF_LUAU_DIR=<that folder>`. On Windows/macOS the sandbox memory limit 
   write it differently, and then the junk simply stays (nothing is guessed).
 - The result has a blank line around every block (function, `if`, loop) and between two short
   `if ... then return end` guards, so long scripts read more easily. It changes nothing in the program.
-- About 500 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
+- About 550 automated tests (`python -m pytest -q tests/`; the ones that need a protected script are skipped when
   `tests/samples/` is empty): sandbox limits, damaged/truncated files, hard timeout, queue, the URL downloader (local
-  server + fake resolver), the command line (single file, folders, `--jobs`, `--detect`), the decompiler and the decoder
+  server + fake resolver, and the paste site's loader), the command line (single file, folders, `--jobs`, `--detect`), the decompiler and the decoder
   on small hand-assembled programs (these need no protected script), the fake Roblox (events, limits, hostile scripts),
   MoonVeil, the progress card, and the whole bot flow (slash, menu, `!uwu`, `!moonveil`, `trace`, `sandbox`)
   using the **real discord.py library with a fake Discord network**.
   A live connection to Discord could **not** be tested where this was built (no token), so the progress card, `!moonveil`
   and the `trace` / `sandbox` replies have not been seen on a real server. To check on your machine: set `GUILD_ID`, start
   the bot, send one file with `/deobf`, one with `!uwu` and one with `!moonveil`. Downloading from the real internet (e.g.
-  raw.githubusercontent.com) could not be tried there either; the TLS path uses aiohttp's defaults.
+  raw.githubusercontent.com) could not be tried there either; the TLS path uses aiohttp's defaults. The paste-loader step
+  was written from the loader text of one paste site and tried against made-up answers only: what that site's script link
+  really answers to the bot has not been seen.
 - MoonVeil was tested with readable scripts that behave like protected ones (calls, loops, callbacks, downloads, a script
   that tries to reach the real globals) in the real Luau sandbox, and with logs made up to test the reader. A real
   MoonVeil-protected file could not be tried where this was built, so a real one may show gaps; read the result as what it
@@ -379,6 +389,7 @@ All the logic is in `bgdeobf.runner.run(data, Options())` (it returns `Result.te
 | `bot.py` | Discord bot (slash, menu, `!uwu`, `!moonveil`) |
 | `card.py` | the live progress card the bot shows while a job runs |
 | `fetch.py` | safe URL downloader (anti-SSRF) |
+| `paste_envelope.py` | reads the script link out of a paste site's Roblox-only loader (text only, no network) |
 | `loader.py`, `patch.py`, `dumper.lua.tpl`, `sandbox.py` | recognize the loader, unpack the VM; `sandbox.py` also runs the limited Luau process |
 | `moonveil.py`, `moonveil.lua.tpl` | MoonVeil: runs the script in a recording harness and writes the behaviour reconstruction |
 | `tracer.py` | runs a script in the fake Roblox, reads its log, writes the report (`--trace`, `--sandbox`) |
