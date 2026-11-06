@@ -243,3 +243,19 @@ def test_plain_statement():
     assert not plain_statement('\tfoo(function()')
     assert not plain_statement('\tlocal t = {')
     assert not plain_statement('\treturn 1')
+
+
+def test_windows_line_endings_from_luau_do_not_change_the_result(monkeypatch):
+    """The Windows build of Luau ends every printed line with \\r\\n. The answers without a payload (true / false of a
+    check, nil of a value) were misread then, and the cleanup silently left every always-true check in the script."""
+    from bgdeobf import clean
+    src = ('local function f()\n\tif math.abs(os.clock()) + 1 > 0 then\n\t\tprint("real")\n\telse\n\t\tprint("junk")\n'
+           '\tend\n\n\tlocal x = (function()\n\t\treturn nil\n\tend)()\n\n\treturn x\nend\n\nf()\n')
+    want, want_stats = clean_source(src)
+    assert 'junk' not in want and want_stats['checks'] == 1             # the sample does exercise the check
+
+    real = clean.run_luau
+    monkeypatch.setattr(clean, 'run_luau', lambda *a, **k: real(*a, **k).replace(b'\n', b'\r\n'))
+    got, got_stats = clean_source(src)
+    assert got == want
+    assert got_stats == want_stats

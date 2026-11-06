@@ -89,6 +89,28 @@ def _strip_fixed(name):
     return name, {}
 
 
+def split_by_part(stmts, parts_of):
+    """Cut the statements of a fused loop handler into one piece per record part: [[part, [statements]], ...], or None
+    when that is not possible.  `parts_of(statement)` gives the set of record parts it uses.  A statement that uses no
+    part (a temporary being declared, say) goes with the part before it, or with the next part when it comes first
+    (`local f; f = K(B); R[A] = f`)."""
+    groups, pending = [], []
+    for s_ in stmts:
+        ps = parts_of(s_)
+        if len(ps) > 1:
+            return None
+        if not ps:
+            (groups[-1][1] if groups else pending).append(s_)
+            continue
+        part = next(iter(ps))
+        if groups and groups[-1][0] == part:
+            groups[-1][1].append(s_)
+        else:
+            groups.append([part, pending + [s_]])
+            pending = []
+    return None if pending else groups
+
+
 class Classifier(object):
     def __init__(self, loader, domains=None, trials=TRIALS, deadline=None):
         self.deadline = deadline
@@ -326,26 +348,8 @@ class Classifier(object):
                     ps.add(part_of[lkey(n['local'])])
             return ps
 
-        def groups_of(stmts):
-            gs = []
-            for s_ in stmts:
-                ps = parts_in(s_)
-                if len(ps) > 1:
-                    return None
-                if not ps:
-                    if not gs:
-                        return None
-                    gs[-1][1].append(s_)
-                    continue
-                part = next(iter(ps))
-                if gs and gs[-1][0] == part:
-                    gs[-1][1].append(s_)
-                else:
-                    gs.append([part, [s_]])
-            return gs
-
-        pre_groups = groups_of(others)
-        loop_groups = groups_of(w['body']['body'])
+        pre_groups = split_by_part(others, parts_in)
+        loop_groups = split_by_part(w['body']['body'], parts_in)
         if pre_groups is None or loop_groups is None or not loop_groups:
             self.mapping.unknown.append((where, key, 'loop handler: micro-operations not separable'))
             return
