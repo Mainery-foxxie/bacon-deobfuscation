@@ -24,7 +24,6 @@ from .astutil import Src, parse_ast, parse_loc
 from .decomp import lua_str
 from .sandbox import SandboxError, run_luau
 
-# ------------------------------------------------------------------------------------------------ what is harmless
 SAFE_FUNCS = frozenset(['type', 'tostring', 'tonumber', 'select', 'ipairs', 'pairs', 'next', 'rawequal', 'rawlen'])
 SAFE_MEMBERS = {
     'buffer': frozenset(['create', 'fromstring', 'tostring', 'len', 'copy', 'fill', 'readstring', 'writestring',
@@ -39,7 +38,7 @@ SAFE_MEMBERS = {
     'os': frozenset(['clock']),
 }
 
-CLOCK_VALUE = (0.37, 54321.5)                       # an expression is folded only when it gives the same result for both
+CLOCK_VALUE = (0.37, 54321.5)
 CLOCK_PREDICATE = (0.0, 0.0004, 0.5, 1.0, 1.999, 7.77, 100.25, 4096.0, 12345.678, 999999.999, 3000000.5, 8000000.125)
 BATCH = 40
 MAX_CANDIDATES = 6000
@@ -54,7 +53,6 @@ class CleanError(Exception):
     pass
 
 
-# ------------------------------------------------------------------------------------------------ analysis of the AST
 class Info(object):
     """what a subtree is made of: ok = it only does harmless things, ops = how much real work it does,
     decls / refs = locals declared / used inside it (a subtree is self-contained when refs <= decls), obf = it uses what
@@ -117,7 +115,6 @@ class Analyzer(object):
 
     def compute(self, n, parent):
         t = n['type']
-        # ------------------------------------------------------------ expressions
         if t in LITERALS:
             return Info()
         if t == 'AstExprGroup':
@@ -174,7 +171,6 @@ class Analyzer(object):
             return join([self.sub(n['left'], n), self.sub(n['right'], n)], 1)
         if t == 'AstExprIfElse':
             return join([self.sub(n['condition'], n), self.sub(n['trueExpr'], n), self.sub(n.get('falseExpr'), n)], 1)
-        # ------------------------------------------------------------ statements
         if t == 'AstStatBlock':
             return join([self.sub(s, n) for s in n['body']])
         if t == 'AstStatLocal':
@@ -205,8 +201,6 @@ class Analyzer(object):
             return Info()
         if t == 'AstStatExpr':
             return self.sub(n['expr'], n)
-        # anything else (global function declarations, type aliases, interpolated strings, ...) is not harmless; its
-        # children are still looked at so that harmless parts inside it can be found
         for k in kids_of(n):
             self.visit(k, n)
         return BAD
@@ -228,7 +222,6 @@ def kids_of(n):
                     yield x
 
 
-# ------------------------------------------------------------------------------------------------ running candidates
 HARNESS_HEAD = '''local CLK = %s
 local os = {clock = function() return CLK end}
 local W = {}
@@ -258,6 +251,14 @@ def _fmt_clock(v):
     return repr(float(v))
 
 
+def _vm_text(text):
+    """The sandbox hands the program to the VM one byte per character (latin-1), but the script is UTF-8: an accented
+    letter would reach the VM as the single code point U+00E9 instead of its two UTF-8 bytes, and an emoji (above
+    U+00FF) would make the encode fail.  Rewriting every character as the latin-1 characters of its UTF-8 bytes makes
+    the VM read exactly the bytes the source has."""
+    return text.encode('utf-8').decode('latin1')
+
+
 def run_batch(items, clock, timeout, mem_mb):
     """items: [(index, mode, text)] -> {index: result string or None}; raises SandboxError"""
     parts = [HARNESS_HEAD % _fmt_clock(clock)]
@@ -267,9 +268,9 @@ def run_batch(items, clock, timeout, mem_mb):
         else:
             parts.append('put(%d, pcall(function() return %s end))\n' % (idx, text))
     parts.append('print(table.concat(W, "\\n"))\n')
-    out = run_luau(''.join(parts), timeout=timeout, mem_mb=mem_mb).decode('latin1')
+    out = run_luau(_vm_text(''.join(parts)), timeout=timeout, mem_mb=mem_mb).decode('latin1')
     res = {}
-    for line in out.replace('\r', '').split('\n'):          # the Windows build of Luau ends its lines with \r\n
+    for line in out.replace('\r', '').split('\n'):
         f = line.split('\t')
         if len(f) >= 2 and f[0].isdigit():
             res[int(f[0])] = '\t'.join(f[1:])
@@ -332,7 +333,7 @@ class Evaluator(object):
                         res = run_batch(items, clock, self.timeout, self.mem_mb)
                     except SandboxError:
                         res = {}
-                        for it in items:                        # one at a time: find the one that breaks the run
+                        for it in items:
                             if self.spent > self.budget:
                                 break
                             try:
@@ -377,7 +378,6 @@ def wrap_literal(text, res, ctx):
     return text
 
 
-# ------------------------------------------------------------------------------------------------ edits
 class Edit(object):
     __slots__ = ('start', 'end', 'build', 'kind')
 
@@ -407,7 +407,6 @@ class Editor(object):
         return ''.join(out)
 
 
-# ------------------------------------------------------------------------------------------------ the cleaner
 class Cleaner(object):
     def __init__(self, text, timeout=20, mem_mb=512, budget=90):
         self.text = text
@@ -425,7 +424,6 @@ class Cleaner(object):
             return text, self.stats
         return tidy(text), self.stats
 
-    # --------------------------------------------------------------------------- one round
     def round(self, text):
         root = parse_ast(text)
         self.src = Src(text)
@@ -433,8 +431,8 @@ class Cleaner(object):
         an = Analyzer()
         an.run(root)
         self.info = an.info
-        self.values = []            # [(node, ctx, mode-text)]
-        self.chains = []            # [(chain, parent block, index)]
+        self.values = []
+        self.chains = []
         self.suffix = {}
         self.walk_block(root, None)
         if len(self.values) > MAX_CANDIDATES:
@@ -461,7 +459,7 @@ class Cleaner(object):
         end = -1
         for (a, b), node, ctx, res in picked:
             if a < end:
-                continue                                   # inside a bigger one that was folded already
+                continue
             end = b
             lit = wrap_literal(literal_text(res), res, ctx)
             if self.text[a:b] == lit:
@@ -488,7 +486,6 @@ class Cleaner(object):
             return lit
         return build
 
-    # --------------------------------------------------------------------------- walking
     def walk_block(self, block, parent):
         body = block['body']
         for i, st in enumerate(body):
@@ -543,7 +540,7 @@ class Cleaner(object):
                 and not self.trivial_group(n, ctx)):
             self.values.append((n, ctx))
             if t == 'AstExprCall' and n['func']['type'] in ('AstExprFunction', 'AstExprGroup'):
-                return                                      # the inside of a decryptor is not looked at separately
+                return
         elif skip and t == 'AstExprGroup' and False:
             pass
         if t == 'AstExprFunction':
@@ -596,7 +593,6 @@ class Cleaner(object):
             e = e['expr']
         return e['type'] in LITERALS and ctx in ('recv',)
 
-    # --------------------------------------------------------------------------- if chains
     def make_chain(self, st, block, index):
         arms = []
         else_body = None
@@ -655,13 +651,12 @@ class Cleaner(object):
         line_start = self.src.starts[l1]
         indent = self.text[line_start:start]
         if indent.strip() != '':
-            return None                                     # the statement does not start its line
+            return None
         eol = self.text.find('\n', end)
         tail = self.text[end:eol if eol >= 0 else len(self.text)]
         if tail.strip() != '':
             return None
 
-        # which arms run: drop the ones that never do, stop after the one that always does
         keep = []
         final = chain['else_body']
         always = None
@@ -677,7 +672,6 @@ class Cleaner(object):
         if len(keep) == len(arms) and always is None:
             return None
 
-        # the lines of every block that stays
         def bounds(body, cond_node, nxt):
             hl = parse_loc(cond_node['location'])[2] if cond_node is not None else parse_loc(body['location'])[0]
             cl = parse_loc(body['location'])[2]
@@ -700,14 +694,10 @@ class Cleaner(object):
         names = self.declared_names(final) if final is not None and not keep else set()
         wrap_do = bool(names) and not self.safe_to_unwrap(chain, names)
         stats = self.stats
-        # the branches that can never run: arms that are never true, arms behind the one that always is, and the `else`
-        # body when some arm always is (the always-true arm itself is not dead: its body stays)
         dropped = len(arms) - len(keep) - (1 if always is not None else 0)
         if always is not None and chain['else_body'] is not None:
             dropped += 1
 
-        # `return`, `break` and `continue` have to be the last statement of a block: when the block that is taken out of
-        # its `if` ends in one, what follows it in the enclosing block can never run, and goes
         if not keep and not wrap_do and final is not None and final['body'] and chain['block'] is not None \
                 and final['body'][-1]['type'] in ('AstStatReturn', 'AstStatBreak', 'AstStatContinue'):
             rest = chain['block']['body'][chain['index'] + 1:]
@@ -749,7 +739,6 @@ class Cleaner(object):
 
         return Edit(start, end, build, 'chain')
 
-    # --------------------------------------------------------------------------- scoping of an unwrapped block
     def declared_names(self, block):
         names = set()
         for st in block['body']:
@@ -847,7 +836,7 @@ def plain_statement(line):
                 i += 1
             elif c == quote:
                 quote = None
-        elif c in '"\'':
+        elif c in '"\' ':
             quote = c
         elif c in '([{':
             depth += 1
@@ -872,8 +861,6 @@ def tidy(text):
             nxt = next((x for x in lines[i + 1:] if x.strip()), '')
             if (prev.strip() and opens_block(prev)) or (nxt and _CLOSER.match(nxt)):
                 continue
-            # the printer never puts a blank line between two plain statements: what is left is the gap of a wrapper that
-            # was taken away
             if (plain_statement(prev) and plain_statement(nxt) and lines[i + 1].strip() == nxt.strip()
                     and indent_of(prev) == indent_of(nxt)):
                 continue
