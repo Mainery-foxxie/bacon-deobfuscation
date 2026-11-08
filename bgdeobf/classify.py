@@ -111,6 +111,48 @@ def split_by_part(stmts, parts_of):
     return None if pending else groups
 
 
+def register_read(s_, rec_loc, var_part, part_of, reads):
+    """If `s_` reads a record part (`local V = REC[11 + k]`) or decodes one (`local a, b, c = FUSED(V)`), note it in
+    `var_part` / `part_of` / `reads` and say True; otherwise leave everything alone and say False."""
+    part = Classifier._part_read(s_, rec_loc)
+    if part is not None:
+        var_part[lkey(s_['vars'][0])] = part
+        reads.setdefault(part, []).append(s_)
+        return True
+    fp = Classifier._fused_read(s_, var_part)
+    if fp is not None:
+        for v in s_['vars']:
+            part_of[lkey(v)] = fp
+        reads[fp].append(s_)
+        return True
+    return False
+
+
+def hoist_loop_reads(stmts, rec_loc, var_part, part_of, reads):
+    """The statements of a fused loop's body, with the record-part reads that sit inside the loop taken out.
+
+    Most builds read every part in front of the loop.  Newer ones (Bacon Guard v0.42, build 814ce50c5703) read the part of
+    the loop body inside it, at the top of a block of its own:
+    `while true do <loop control> do local V = REC[12]; local a, b, c = FUSED(V); <the micro-operation> end end`.
+    Left as it is, that block uses no part the splitter knows, so it would be taken for a part of the loop control and the
+    control would not match any reference operation.  Here its reads are registered like the ones in front of the loop and
+    the block is opened up, so what follows them becomes a piece of its own part."""
+    out = []
+    for s_ in stmts:
+        if s_['type'] == 'AstStatBlock':
+            inner = list(s_['body'])
+            k = 0
+            while k < len(inner) and register_read(inner[k], rec_loc, var_part, part_of, reads):
+                k += 1
+            if k:
+                out.extend(inner[k:])
+                continue
+        elif register_read(s_, rec_loc, var_part, part_of, reads):
+            continue
+        out.append(s_)
+    return out
+
+
 class Classifier(object):
     def __init__(self, loader, domains=None, trials=TRIALS, deadline=None):
         self.deadline = deadline
@@ -328,18 +370,9 @@ class Classifier(object):
         rec_loc = fn['args'][0]['location']
         var_part, part_of, reads, others = {}, {}, {}, []
         for s_ in body[:-1]:
-            part = self._part_read(s_, rec_loc)
-            if part is not None:
-                var_part[lkey(s_['vars'][0])] = part
-                reads.setdefault(part, []).append(s_)
-                continue
-            fp = self._fused_read(s_, var_part)
-            if fp is not None:
-                for v in s_['vars']:
-                    part_of[lkey(v)] = fp
-                reads[fp].append(s_)
-                continue
-            others.append(s_)
+            if not register_read(s_, rec_loc, var_part, part_of, reads):
+                others.append(s_)
+        loop_body = hoist_loop_reads(w['body']['body'], rec_loc, var_part, part_of, reads)
 
         def parts_in(s_):
             ps = set()
@@ -349,7 +382,7 @@ class Classifier(object):
             return ps
 
         pre_groups = split_by_part(others, parts_in)
-        loop_groups = split_by_part(w['body']['body'], parts_in)
+        loop_groups = split_by_part(loop_body, parts_in)
         if pre_groups is None or loop_groups is None or not loop_groups:
             self.mapping.unknown.append((where, key, 'loop handler: micro-operations not separable'))
             return
