@@ -1,0 +1,164 @@
+{
+  "legacy_fields_equal": [
+    "functions_orig",
+    "functions_new",
+    "identical",
+    "reordered",
+    "differing",
+    "reordered_protos",
+    "cosmetic",
+    "dead_loads",
+    "report",
+    "match"
+  ],
+  "one_to_one_matches": 222,
+  "identical": 216,
+  "reordered": [
+    75,
+    86
+  ],
+  "cosmetic": [],
+  "strict_differing": [
+    177,
+    216,
+    220,
+    221
+  ],
+  "semantic_proved": [],
+  "semantic_unresolved": [
+    177,
+    216,
+    220,
+    221
+  ],
+  "region_witness_only": [
+    216
+  ],
+  "raw_bytecode": "differences found",
+  "raw_semantic": "incomplete",
+  "raw_applies_to_readable_delivery": false,
+  "fully_verified": false,
+  "protection_removed": false,
+  "application_executed": false,
+  "rust": {
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--jobs",
+      "1",
+      "--all-targets",
+      "--no-fail-fast",
+      "--",
+      "--test-threads=1"
+    ],
+    "targets_reported": 19,
+    "passed": 439,
+    "failed": 0,
+    "ignored": 7,
+    "exit": 0,
+    "by_target": {
+      "src/lib.rs": [
+        51,
+        0,
+        0
+      ],
+      "src/bin/bgdeobf.rs": [
+        0,
+        0,
+        0
+      ],
+      "src/bin/bgdeobf-bot.rs": [
+        0,
+        0,
+        0
+      ],
+      "tests/bot.rs": [
+        62,
+        0,
+        0
+      ],
+      "tests/bot_lifecycle.rs": [
+        3,
+        0,
+        0
+      ],
+      "tests/bot_startup.rs": [
+        1,
+        0,
+        0
+      ],
+      "tests/cleanup.rs": [
+        62,
+        0,
+        0
+      ],
+      "tests/cli.rs": [
+        25,
+        0,
+        1
+      ],
+      "tests/contracts.rs": [
+        4,
+        0,
+        0
+      ],
+      "tests/decompiler.rs": [
+        83,
+        0,
+        0
+      ],
+      "tests/engine.rs": [
+        15,
+        0,
+        3
+      ],
+      "tests/engine_cli.rs": [
+        6,
+        0,
+        0
+      ],
+      "tests/fetch.rs": [
+        20,
+        0,
+        0
+      ],
+      "tests/format.rs": [
+        25,
+        0,
+        3
+      ],
+      "tests/parity.rs": [
+        4,
+        0,
+        0
+      ],
+      "tests/process.rs": [
+        16,
+        0,
+        0
+      ],
+      "tests/tracer.rs": [
+        26,
+        0,
+        0
+      ],
+      "tests/vm.rs": [
+        35,
+        0,
+        0
+      ],
+      "examples/recover_baconboss.rs": [
+        1,
+        0,
+        0
+      ]
+    }
+  },
+  "clippy_exit": 0,
+  "format_exit": 0,
+  "earlier_test_runs": "One run exceeded the six-second worker assertion. A later run timed out before the expected child output in two Windows process tests. No deadlines or process tests were changed."
+}

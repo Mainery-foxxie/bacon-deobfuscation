@@ -1,0 +1,108 @@
+[package]
+name = "bgdeobf"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Native Bacon Guard / FORGE deobfuscator and Discord bot"
+autobins = false
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bgdeobf"
+path = "src/bin/bgdeobf.rs"
+
+[[bin]]
+name = "bgdeobf-bot"
+path = "src/bin/bgdeobf-bot.rs"
+
+[[example]]
+name = "recover_baconboss"
+path = "src/examples/recover_baconboss.rs"
+
+[[test]]
+name = "bot"
+path = "test/bot.rs"
+
+[[test]]
+name = "bot_lifecycle"
+path = "test/bot_lifecycle.rs"
+
+[[test]]
+name = "bot_startup"
+path = "test/bot_startup.rs"
+
+[[test]]
+name = "cleanup"
+path = "test/cleanup.rs"
+
+[[test]]
+name = "cli"
+path = "test/cli.rs"
+
+[[test]]
+name = "contracts"
+path = "test/contracts.rs"
+
+[[test]]
+name = "decompiler"
+path = "test/decompiler.rs"
+
+[[test]]
+name = "engine"
+path = "test/engine.rs"
+
+[[test]]
+name = "engine_cli"
+path = "test/engine_cli.rs"
+
+[[test]]
+name = "fetch"
+path = "test/fetch.rs"
+
+[[test]]
+name = "format"
+path = "test/format.rs"
+
+[[test]]
+name = "parity"
+path = "test/parity.rs"
+
+[[test]]
+name = "process"
+path = "test/process.rs"
+
+[[test]]
+name = "tracer"
+path = "test/tracer.rs"
+
+[[test]]
+name = "vm"
+path = "test/vm.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }
+regex = "1"
+indexmap = { version = "2", features = ["serde"] }
+tempfile = "3"
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+serenity = { version = "0.12", default-features = false, features = ["builder", "cache", "client", "gateway", "http", "model", "rustls_backend", "utils"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus"] }
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,37 @@
+//! Native Rust implementation of the bgdeobf application.
+
+pub mod astutil;
+pub mod bot;
+pub mod card;
+pub mod classify;
+pub mod clean;
+pub mod cli;
+pub mod decode;
+pub mod decomp;
+pub mod dump;
+pub mod engine;
+pub mod error;
+pub mod fetch;
+pub mod fidelity;
+pub mod gen;
+pub mod ir;
+pub mod loader;
+pub mod luavm;
+pub mod messages;
+pub mod model;
+pub mod moonveil;
+pub mod namesfile;
+pub mod paste_envelope;
+pub mod patch;
+pub mod post;
+pub mod printer;
+pub mod process;
+pub mod refspec;
+pub mod render;
+pub mod runner;
+pub mod sandbox;
+pub mod service;
+pub mod source_cleanup;
+pub mod static_image;
+pub mod tracer;
+pub mod unflatten;

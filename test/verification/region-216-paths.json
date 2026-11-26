@@ -1,0 +1,26 @@
+{
+  "prototype": 216,
+  "record_range": [
+    304099439,
+    304099927
+  ],
+  "compiler_instruction_range": [
+    24,
+    57
+  ],
+  "result_vectors_checked": 65536,
+  "max_calls": 8,
+  "call_return_classes": [
+    "nil",
+    "false",
+    "distinct truthy object per call",
+    "error"
+  ],
+  "compared": [
+    "ordered upvalue reads",
+    "call targets and arguments",
+    "thrown call ordinal",
+    "exact accumulator value and identity at region exit"
+  ],
+  "scope": "Independent bounded differential check of the changed region, not an application execution or a proof of caller bindings."
+}

@@ -1,0 +1,42 @@
+{
+  "seed_record": 304099439,
+  "original_region_records": 33,
+  "original_directed_edges": 40,
+  "on_truthy_follow_already_true_guards": [
+    304099399,
+    304099831,
+    304099703,
+    304099559,
+    304100159,
+    304099607,
+    304099543,
+    304099927
+  ],
+  "compiled_truthy_branches": [
+    [
+      27,
+      57
+    ],
+    [
+      32,
+      57
+    ],
+    [
+      37,
+      57
+    ],
+    [
+      42,
+      57
+    ],
+    [
+      47,
+      57
+    ],
+    [
+      54,
+      57
+    ]
+  ],
+  "explanation": "Removing a statically false first test leaves six intermediate truthiness tests; all seven operand results reach the same final selection."
+}
